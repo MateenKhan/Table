@@ -1,0 +1,266 @@
+// VENDORED VERBATIM FROM piranha ui/src/pages/tasks/components/Toast.tsx — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Tooltip } from './Tooltip';
+import { AnimatePresence, motion } from 'framer-motion';
+import { CheckCircle2, AlertTriangle, Info, X, Copy, Check, ChevronDown, ArrowRight } from 'lucide-react';
+
+export type ToastKind = 'success' | 'error' | 'info';
+
+interface Toast {
+  id: number;
+  kind: ToastKind;
+  title: string;
+  message?: string;
+  /** Long-form detail (error stack / command output). Rendered in an expandable,
+   *  copyable block. Toasts with details are sticky (no auto-dismiss) so they can be read. */
+  details?: string;
+  /** An optional primary action, rendered as a real button in the row.
+   *
+   *  This exists so a notification can CARRY the thing it is telling you about instead of
+   *  describing it in prose you then have to act on yourself — an inline banner that says
+   *  "open them from the Explorer" becomes a toast with an "Open Explorer" button. Toasts with
+   *  an action are sticky, like detail toasts: an action that times out is worse than no
+   *  action. Firing it dismisses the toast. */
+  action?: { label: string; onClick: () => void };
+}
+
+export interface ToastOptions {
+  kind?: ToastKind;
+  title: string;
+  message?: string;
+  details?: string;
+  action?: { label: string; onClick: () => void };
+}
+
+interface ToastApi {
+  /** Fire a notification. Returns the toast id (rarely needed). */
+  push: (kind: ToastKind, title: string, message?: string, details?: string) => number;
+  /** Options-object form — the only way to attach an `action` button. Everything the
+   *  positional helpers do, plus the bits that don't fit four positional arguments. */
+  notify: (opts: ToastOptions) => number;
+  success: (title: string, message?: string, details?: string) => number;
+  error: (title: string, message?: string, details?: string) => number;
+  info: (title: string, message?: string, details?: string) => number;
+  /** Fire an error toast from a caught value — pulls message + stack automatically. */
+  fromError: (title: string, err: unknown, extra?: string) => number;
+  dismiss: (id: number) => void;
+}
+
+const ToastCtx = createContext<ToastApi | null>(null);
+
+/** Global notification hook. Any component under <ToastProvider> can fire toasts. */
+export function useToast(): ToastApi {
+  const ctx = useContext(ToastCtx);
+  if (!ctx) throw new Error('useToast must be used within <ToastProvider>');
+  return ctx;
+}
+
+/**
+ * The same context, but `null` instead of a throw when there is no provider.
+ *
+ * For SHARED PRIMITIVES only (see `components/AsyncButton.tsx`), which are rendered by every
+ * page AND by unit tests that mount one control in isolation. A primitive that hard-required a
+ * ToastProvider would make "render this button" a three-provider setup, and — worse — would
+ * turn a missing provider into a crash on a screen that was otherwise fine. Page code should
+ * keep using `useToast()`: there, a missing provider IS a wiring bug and should be loud.
+ */
+export function useOptionalToast(): ToastApi | null {
+  return useContext(ToastCtx);
+}
+
+/** Extract a human message + a copyable detail block (stack / output) from any thrown value. */
+export function describeError(err: unknown): { message: string; details: string } {
+  if (err instanceof Error) {
+    return { message: err.message || err.name || 'Error', details: err.stack || `${err.name}: ${err.message}` };
+  }
+  if (typeof err === 'string') return { message: err, details: err };
+  try { const s = JSON.stringify(err, null, 2); return { message: 'Unexpected error', details: s }; }
+  catch { return { message: String(err), details: String(err) }; }
+}
+
+const KIND_STYLE: Record<ToastKind, { ring: string; icon: React.ReactNode; bar: string }> = {
+  success: { ring: 'border-emerald-200', bar: 'bg-emerald-500', icon: <CheckCircle2 size={18} className="text-emerald-600" /> },
+  error: { ring: 'border-rose-200', bar: 'bg-rose-500', icon: <AlertTriangle size={18} className="text-rose-600" /> },
+  info: { ring: 'border-sky-200', bar: 'bg-sky-500', icon: <Info size={18} className="text-sky-600" /> },
+};
+
+/**
+ * Auto-dismiss durations (item 97) — one source of truth, two tiers keyed by how much the
+ * toast asks of the reader:
+ *   transient  (success / info) ......... 4.2s — confirms something already on screen.
+ *   persistent (error, OR any toast with a details/stack block) .. 9s — must be read, and
+ *                                          often expanded + copied, so it lingers.
+ * Hovering a row pauses its own timer (see ToastRow), so these are minimums, not deadlines.
+ * Position/stacking is unified separately, at the ToastProvider container.
+ */
+const DISMISS_MS = { transient: 4200, persistent: 9000 } as const;
+const durationFor = (t: Toast) =>
+  t.kind === 'error' || t.details || t.action ? DISMISS_MS.persistent : DISMISS_MS.transient;
+
+/** One toast row: self-managed auto-hide (paused on hover), expand + copy. */
+function ToastRow({ t, onDismiss }: { t: Toast; onDismiss: (id: number) => void }) {
+  const s = KIND_STYLE[t.kind];
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [paused, setPaused] = useState(false);
+
+  // Auto-hide, longer for errors/details; pause while hovered so it can be read/copied.
+  useEffect(() => {
+    if (paused) return;
+    const id = setTimeout(() => onDismiss(t.id), durationFor(t));
+    return () => clearTimeout(id);
+  }, [paused, t.id, t.kind, t.details, t.action, onDismiss]);
+
+  const copy = async () => {
+    const text = [t.title, t.message, t.details ? `\n${t.details}` : ''].filter(Boolean).join('\n');
+    try { await navigator.clipboard.writeText(text); }
+    catch { /* fallback for non-secure contexts */ const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch { /* give up */ } ta.remove(); }
+    setCopied(true); setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, x: 80 }}          // slide in from the right → left
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 80 }}              // slide out to the right
+      transition={{ type: 'spring', damping: 28, stiffness: 340 }}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      data-feature-id="toast"
+      // The live region is the CONTAINER, not this row — see ToastProvider. A row is created
+      // at announce time, and a screen reader subscribes to regions that already exist; it
+      // cannot subscribe to a node that arrives carrying its own aria-live. `aria-atomic`
+      // stays here so the row is read as one unit rather than piecemeal.
+      aria-atomic="true"
+      className={`pointer-events-auto w-full sm:w-auto sm:min-w-[320px] sm:max-w-md bg-white border ${s.ring} rounded-xl shadow-lg shadow-slate-500/15 overflow-hidden flex`}
+    >
+      <div className={`w-1 shrink-0 ${s.bar}`} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-start gap-3 px-4 py-3">
+          <div className="shrink-0 mt-0.5">{s.icon}</div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-slate-900 leading-tight">{t.title}</p>
+            {t.message && <p className="text-xs text-slate-500 mt-0.5 leading-snug break-words">{t.message}</p>}
+            {t.action && (
+              // Not inside the aria-live carve-out below: the action's LABEL is part of what
+              // this notification says ("…sent 5 files — Open Explorer"), so it should be read
+              // out with the title, not suppressed like the expand/copy chrome.
+              <button
+                onClick={() => { t.action!.onClick(); onDismiss(t.id); }}
+                data-feature-id="toast-action"
+                className="mt-2 flex items-center gap-1 text-2xs font-bold text-accent-700 sm:hover:text-accent-800 active:scale-[0.97] transition-all"
+              >
+                {t.action.label} <ArrowRight size={12} />
+              </button>
+            )}
+            {t.details && (
+              // aria-live="off" (item 84): the title+message above are the announcement, made
+              // ONCE when the row is inserted. This footer and the <pre> below mutate on user
+              // action (expand, Copy→Copied) — carving them out of the live region stops those
+              // mutations from re-announcing the whole atomic toast (incl. the full stack trace).
+              // The buttons stay reachable/announced via focus, which is independent of aria-live.
+              <div aria-live="off" className="mt-1.5 flex items-center gap-2">
+                <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1 text-2xs font-bold text-slate-500 sm:hover:text-slate-800">
+                  <ChevronDown size={12} className={`transition-transform ${open ? 'rotate-180' : ''}`} /> Details
+                </button>
+                <Tooltip label="Copy message + stack trace"><button onClick={copy} data-feature-id="toast-copy" className="flex items-center gap-1 text-2xs font-bold text-slate-500 sm:hover:text-accent-700">
+                  {copied ? <><Check size={12} className="text-emerald-600" /> Copied</> : <><Copy size={12} /> Copy</>}
+                </button></Tooltip>
+              </div>
+            )}
+          </div>
+          <button onClick={() => onDismiss(t.id)} aria-label="Dismiss" className="shrink-0 -m-1 p-1 text-slate-500 sm:hover:text-slate-700 rounded-lg transition-colors">
+            <X size={15} />
+          </button>
+        </div>
+        {t.details && open && (
+          <pre aria-live="off" className="mx-4 mb-3 max-h-52 overflow-auto custom-scrollbar rounded-lg bg-slate-900 text-slate-100 text-[10.5px] leading-relaxed font-mono p-2.5 whitespace-pre-wrap break-words">{t.details}</pre>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+const MAX_TOASTS = 5; // keep the newest few; older ones drop off the top
+
+export function ToastProvider({ children }: { children: React.ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const idRef = useRef(0);
+
+  const dismiss = useCallback((id: number) => {
+    setToasts(list => list.filter(t => t.id !== id));
+  }, []);
+
+  const notify = useCallback((opts: ToastOptions) => {
+    const id = ++idRef.current;
+    // Append newest last → it renders at the BOTTOM of the bottom-anchored stack; older ones
+    // get pushed up (and trimmed to the newest MAX_TOASTS). Auto-hide is per-row.
+    setToasts(list => [...list, { id, kind: opts.kind ?? 'info', title: opts.title, message: opts.message, details: opts.details, action: opts.action }].slice(-MAX_TOASTS));
+    return id;
+  }, []);
+
+  const push = useCallback((kind: ToastKind, title: string, message?: string, details?: string) =>
+    notify({ kind, title, message, details }), [notify]);
+
+  const api: ToastApi = {
+    push,
+    notify,
+    success: (t, m, d) => push('success', t, m, d),
+    error: (t, m, d) => push('error', t, m, d),
+    info: (t, m, d) => push('info', t, m, d),
+    fromError: (t, err, extra) => { const { message, details } = describeError(err); return push('error', t, message, [extra, details].filter(Boolean).join('\n\n')); },
+    dismiss,
+  };
+
+  // A11Y (safety, not polish): agents autonomously edit and merge a git repo, and this is the
+  // only channel that says so. A live region must EXIST BEFORE its content changes — a screen
+  // reader subscribes to the region, not to arriving nodes. Both containers below are therefore
+  // rendered unconditionally, empty, for the life of the app; inserting a row into one is the
+  // change that gets announced.
+  //
+  // Two of them, because one element cannot be both assertive and polite. Errors interrupt
+  // ("Merge failed"); success/info wait for a pause ("Task merged"). Splitting by kind also
+  // means a stream of successes can never delay an error announcement behind it in the queue.
+  //
+  // `aria-atomic="false"` overrides the implicit `true` that role=alert/status carry: without
+  // it, adding one toast re-announces every toast still on screen.
+  const errors = toasts.filter(t => t.kind === 'error');
+  const rest = toasts.filter(t => t.kind !== 'error');
+  const stack = 'flex flex-col gap-2 items-stretch sm:items-end w-full sm:w-auto';
+
+  return (
+    <ToastCtx.Provider value={api}>
+      {children}
+      {/* Position/stacking (item 97) — unified for every toast regardless of kind:
+       *   • Anchored bottom-right (bottom-left inset honours the safe-area on mobile).
+       *   • Single vertical column, gap-2 between rows; newest at the BOTTOM, older ones
+       *     move up as new arrive, trimmed to MAX_TOASTS.
+       *   • Mobile (<sm): full-width edge-to-edge; ≥sm: right-aligned, min-w 320 / max-w md.
+       * The errors (assertive) and rest (polite) stacks share the same gap-2/alignment so the
+       * two live regions read as one continuous column. */}
+      {/* PORTALLED TO document.body, deliberately. `position: fixed` is resolved against the
+          nearest ancestor with a transform/filter/will-change — not the viewport — and z-index
+          only competes INSIDE that ancestor's stacking context. React Flow's panes are
+          transformed, so an inline toast stack on /canvas painted UNDERNEATH the MiniMap and
+          was simply invisible in the bottom-right, z-[85] notwithstanding. Portalling escapes
+          every such context, so a toast is visible on every page rather than on most of them. */}
+      {typeof document !== 'undefined' && createPortal(
+        <div className="fixed z-[85] bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 left-4 sm:left-auto sm:right-6 flex flex-col gap-2 items-stretch sm:items-end pointer-events-none">
+          <div role="alert" aria-live="assertive" aria-atomic="false" aria-label="Errors" className={stack}>
+            <AnimatePresence initial={false}>
+              {errors.map(t => <ToastRow key={t.id} t={t} onDismiss={dismiss} />)}
+            </AnimatePresence>
+          </div>
+          <div role="status" aria-live="polite" aria-atomic="false" aria-label="Notifications" className={stack}>
+            <AnimatePresence initial={false}>
+              {rest.map(t => <ToastRow key={t.id} t={t} onDismiss={dismiss} />)}
+            </AnimatePresence>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </ToastCtx.Provider>
+  );
+}

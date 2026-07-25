@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Foundation — mirrors piranha ui/src/index.css so this table imports cleanly.
+   Light theme is the default (§1); every value traces to a piranha token (§16).
+   ──────────────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    /* The page itself never scrolls — only the table body does. */
+    overflow: hidden;
+  }
+
+  html {
+    /* piranha pins the root to 15px; rem values are authored against it (§3). */
+    font-size: 15px;
+  }
+
+  body {
+    @apply font-sans text-slate-900;
+    background: #f1f5f9; /* slate-100 page surface (§1) */
+  }
+
+  /* One consistent, high-contrast ring on KEYBOARD focus only — never on mouse
+     click (§6). Accent is the tier-1 focus colour (§2). */
+  :focus-visible {
+    outline: 2px solid #ff3b1d;
+    outline-offset: 2px;
+  }
+
+  /* Motion escape hatch (§9 / WCAG 2.2.2). The rAF-driven column drag reads this
+     too — see columnDrag / useColumnDrag. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* ── Buttons ──────────────────────────────────────────────────────────────
+     Three tiers (§2 Danger Hierarchy): ghost/primary are calm; danger out-shouts
+     with fill + weight, never hue alone. Hover is gated behind sm: so a tap on
+     touch doesn't leave a control stuck highlighted (§6). */
+
+  .btn-primary,
+  .btn-ghost,
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 min-h-control-lg px-4
+      rounded-xl font-bold transition-colors
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary-sm,
+  .btn-ghost-sm,
+  .btn-danger-sm {
+    @apply inline-flex items-center justify-center gap-1.5 min-h-control px-3
+      rounded-lg text-sm font-bold transition-colors
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* Tier 2 ROUTINE — dark, confident, calm. This is NOT danger (§2). */
+  .btn-primary,
+  .btn-primary-sm {
+    @apply bg-slate-900 text-white sm:hover:bg-slate-800 active:bg-slate-700;
+  }
+
+  /* Neutral secondary. */
+  .btn-ghost,
+  .btn-ghost-sm {
+    @apply bg-white border text-slate-800 sm:hover:bg-slate-50 active:bg-slate-100;
+    border-color: #a9b8cb; /* hairline (§2b) — @apply can't reach the remap */
+  }
+
+  /* Tier 3 DESTRUCTIVE — must out-shout tier 2 (§2). font-black is reserved to
+     this and .eyebrow (§3). Pair with a confirm step at the call site. */
+  .btn-danger,
+  .btn-danger-sm {
+    @apply bg-rose-600 text-white font-black sm:hover:bg-rose-700 active:bg-rose-800;
+  }
+
+  /* ── Icon buttons ─────────────────────────────────────────────────────────
+     Responsively sized: 44px where a finger might reach, 36px at sm+ where a
+     cursor makes the extra bulk (§7). Press feedback is instant, not eased (§6). */
+  .icon-btn {
+    @apply inline-grid place-items-center rounded-lg text-slate-600
+      w-control-lg h-control-lg sm:w-control sm:h-control
+      transition-[color,background-color,transform]
+      sm:hover:bg-slate-100 active:scale-[0.97]
+      disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+  /* Fixed 36px — compact toolbar context. */
+  .icon-btn-sm {
+    @apply inline-grid place-items-center rounded-lg text-slate-600
+      w-control h-control
+      transition-[color,background-color,transform]
+      sm:hover:bg-slate-100 active:scale-[0.97]
+      disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+  .icon-btn-plain {
+    @apply bg-transparent sm:hover:text-slate-900 sm:hover:bg-transparent;
+  }
+  /* Rose AT REST, not only on hover — the affordance must be visible while the
+     user is deciding (§6). Reserve for irreversible actions. */
+  .icon-btn-danger {
+    @apply text-rose-600 sm:hover:bg-rose-50;
+  }
+
+  /* ── Inputs ───────────────────────────────────────────────────────────────
+     placeholder:text-slate-400 is the one sanctioned sub-AA muted text (§3). */
+  .input {
+    @apply w-full min-h-control-lg px-3 rounded-xl bg-white border text-slate-900
+      placeholder:text-slate-400 transition-colors;
+    border-color: #a9b8cb;
+  }
+  .input-sm,
+  .select-sm {
+    @apply w-full min-h-control px-3 rounded-lg bg-white border text-slate-900
+      text-sm placeholder:text-slate-400 transition-colors;
+    border-color: #a9b8cb;
+  }
+
+  /* The app's one small-caps section-label pattern (§3): text-micro font-black
+     uppercase tracking-widest text-slate-500. Use the class, don't hand-roll. */
+  .eyebrow {
+    @apply uppercase text-slate-500;
+    font-size: 10px;
+    line-height: 14px;
+    font-weight: 900;
+    letter-spacing: 0.1em;
+  }
+}
+
+@layer utilities {
+  /* Surface-separation border remap (§2b): the default border-slate-200
+     (#e2e8f0) is 1.23:1 on white — invisible. Point the BARE class at a hairline
+     that actually reads. Reaches `border-slate-200`, not opacity/variant forms. */
+  .border-slate-200 {
+    border-color: #a9b8cb; /* neutral.250 — 2.02:1 */
+  }
+  .border-slate-300 {
+    border-color: #94a3b8; /* neutral.400 — 2.56:1 */
+  }
+
+  /* Shared thin-scrollbar skin (§8) — use this instead of the browser default. */
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 9999px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}

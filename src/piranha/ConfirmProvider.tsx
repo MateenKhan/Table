@@ -1,0 +1,76 @@
+// VENDORED VERBATIM FROM piranha ui/src/pages/tasks/components/ConfirmProvider.tsx — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
+import { ConfirmDialog, ConfirmTone } from './ConfirmDialog';
+
+export interface ConfirmOptions {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  /** Irreversible ops only: user must type this exact string to unlock Confirm. */
+  requireType?: string;
+  cancelLabel?: string;
+  tone?: ConfirmTone;
+  /**
+   * The BLAST RADIUS, itemized. "This cannot be undone" is not enough once an action reaches
+   * past the row you clicked (a project delete now also removes a folder, tasks, logs, the code
+   * index and Docker containers) — each line here names one concrete thing that will be
+   * destroyed, or explicitly one that will be KEPT, for THIS subject.
+   */
+  details?: string[];
+}
+
+type ConfirmFn = (opts: ConfirmOptions) => Promise<boolean>;
+
+const ConfirmCtx = createContext<ConfirmFn | null>(null);
+
+/**
+ * Promise-based confirmation. `const confirm = useConfirm();`
+ * then `if (await confirm({ title, message })) { ...destructive... }`.
+ * Works from any component under <ConfirmProvider> — no prop drilling.
+ */
+export function useConfirm(): ConfirmFn {
+  const ctx = useContext(ConfirmCtx);
+  if (!ctx) throw new Error('useConfirm must be used within <ConfirmProvider>');
+  return ctx;
+}
+
+interface State extends ConfirmOptions { open: boolean; }
+
+export function ConfirmProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<State>({ open: false, title: '', message: '' });
+  const resolver = useRef<((v: boolean) => void) | null>(null);
+
+  const confirm = useCallback<ConfirmFn>((opts) => {
+    setState({ ...opts, open: true });
+    return new Promise<boolean>(resolve => { resolver.current = resolve; });
+  }, []);
+
+  const settle = (result: boolean) => {
+    resolver.current?.(result);
+    resolver.current = null;
+    setState(s => ({ ...s, open: false }));
+  };
+
+  return (
+    <ConfirmCtx.Provider value={confirm}>
+      {children}
+      <AnimatePresence>
+        {state.open && (
+          <ConfirmDialog
+            isOpen={state.open}
+            title={state.title}
+            message={state.message}
+            details={state.details}
+            confirmLabel={state.confirmLabel}
+            requireType={state.requireType}
+            cancelLabel={state.cancelLabel}
+            tone={state.tone}
+            onConfirm={() => settle(true)}
+            onCancel={() => settle(false)}
+          />
+        )}
+      </AnimatePresence>
+    </ConfirmCtx.Provider>
+  );
+}
