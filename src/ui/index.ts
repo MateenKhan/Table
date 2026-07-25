@@ -1,5 +1,5 @@
-// Barrel for the vendored piranha components. At import into piranha, DELETE
-// src/piranha/ and repoint these imports to piranha's real modules:
+// Barrel for the vendored the shared UI components. At import into the shared UI, DELETE
+// src/ui/ and repoint these imports to the shared UI's real modules:
 //   Tooltip        → ui/src/pages/tasks/components/Tooltip
 //   Modal          → ui/src/components/Modal
 //   ConfirmProvider/useConfirm → ui/src/pages/tasks/components/ConfirmProvider

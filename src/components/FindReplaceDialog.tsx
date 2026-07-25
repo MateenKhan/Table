@@ -1,10 +1,10 @@
 import React from 'react'
 import { Search, Replace, AlertTriangle, CaseSensitive, Regex, SquareEqual } from 'lucide-react'
-import { Modal, useToast, useConfirm } from '../piranha'
-import { Tooltip } from '../piranha/Tooltip'
+import { Modal, useToast, useConfirm } from '../ui'
+import { Tooltip } from '../ui/Tooltip'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FindReplaceDialog — spreadsheet-wide find & replace, inside the shared piranha
+// FindReplaceDialog — spreadsheet-wide find & replace, inside the shared the shared UI
 // Modal. Fully props-driven: the parent owns the table data (`rows`/`columns`)
 // and applies edits through `onApply` — this dialog NEVER mutates `rows`. It only
 // scans the data, previews matches, and emits an `updates` array describing the

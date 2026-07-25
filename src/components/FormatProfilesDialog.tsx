@@ -5,12 +5,12 @@ import {
   useFormatProfilesVersion,
   FormatProfile,
 } from '../formatProfiles'
-import { Modal, useConfirm, useToast } from '../piranha'
-import { Tooltip } from '../piranha/Tooltip'
+import { Modal, useConfirm, useToast } from '../ui'
+import { Tooltip } from '../ui/Tooltip'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FormatProfilesDialog — CRUD for named bundles of the grid's FORMATTING (never
-// its data), inside the shared piranha Modal. Two regions: "Save current format"
+// its data), inside the shared the shared UI Modal. Two regions: "Save current format"
 // (name + Save, with an overwrite confirm), and a searchable, column-SORTABLE
 // mini-table for finding, applying, renaming, re-snapshotting and deleting
 // profiles. A profile captures a snapshot of BOTH the `tableFormatting` and

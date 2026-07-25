@@ -1,109 +1,25 @@
-import type { ReactNode } from 'react'
-import { RotateCcw, Trash2, Eraser } from 'lucide-react'
+import { RotateCcw, Trash2 } from 'lucide-react'
 import { useCellSelection } from '../useCellSelection'
-import Tooltip from '../piranha/Tooltip'
-import { useConfirm } from '../piranha'
+import Tooltip from '../ui/Tooltip'
+import { useConfirm } from '../ui'
 
-// The always-visible quick actions shown in the collapsed actions row. The
-// destructive slot CHANGES with the current selection:
-//   • cells / range / all  → Clear cells (empties the selected cells' values)
-//   • rows                 → Delete rows
-//   • columns              → Clear columns
-//   • nothing selected     → Delete all rows
+// The always-visible quick actions shown in the collapsed actions row: Reload,
+// and — only when NOTHING is selected — a "reset the table" wipe. Anything that
+// acts on a selection (the unified Clear, delete row, delete/insert column) now
+// lives in the contextual ops strip, so there is a single, consistent place for
+// each and no per-kind guessing here.
 type Props = {
   onReload: () => void
   onDeleteAll: () => void
-  onDeleteRows: (rowIndices: number[]) => void
-  onEmptyColumns: (columnIds: string[]) => void
 }
 
-export default function PeekActions({
-  onReload,
-  onDeleteAll,
-  onDeleteRows,
-  onEmptyColumns,
-}: Props) {
+export default function PeekActions({ onReload, onDeleteAll }: Props) {
   const selection = useCellSelection()
   const confirm = useConfirm()
-  const scope = selection?.selectionScope
-  const kind = scope?.kind ?? 'none'
+  const kind = selection?.selectionScope?.kind ?? 'none'
 
   const guard = async (message: string, run: () => void) => {
     if (await confirm({ title: 'Confirm', message, tone: 'danger' })) run()
-  }
-
-  // Clear the selected cells' values by focusing the grid and firing Delete —
-  // the grid's own Delete handler clears the active range (and it's undoable).
-  const clearCells = () => {
-    selection?.focusGrid()
-    window.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }),
-    )
-  }
-
-  let destructive: ReactNode = null
-  if (kind === 'rows' && scope?.rowIndices.length) {
-    const rows = scope.rowIndices
-    destructive = (
-      <Tooltip label={`Delete ${rows.length} selected row(s)`}>
-        <button
-          type="button"
-          className="icon-btn-sm icon-btn-danger"
-          aria-label="Delete selected rows"
-          onClick={() =>
-            guard(`Delete ${rows.length} selected row(s)?`, () =>
-              onDeleteRows(rows),
-            )
-          }
-        >
-          <Trash2 size={16} />
-        </button>
-      </Tooltip>
-    )
-  } else if (kind === 'columns' && scope?.columnIds.length) {
-    const cols = scope.columnIds
-    destructive = (
-      <Tooltip label={`Clear ${cols.length} selected column(s)`}>
-        <button
-          type="button"
-          className="icon-btn-sm icon-btn-danger"
-          aria-label="Clear selected columns"
-          onClick={() =>
-            guard(`Clear values in ${cols.length} column(s)?`, () =>
-              onEmptyColumns(cols),
-            )
-          }
-        >
-          <Eraser size={16} />
-        </button>
-      </Tooltip>
-    )
-  } else if (kind === 'cell' || kind === 'range' || kind === 'all') {
-    destructive = (
-      <Tooltip label="Clear selected cells (Del)">
-        <button
-          type="button"
-          className="icon-btn-sm icon-btn-danger"
-          aria-label="Clear selected cells"
-          onClick={clearCells}
-        >
-          <Eraser size={16} />
-        </button>
-      </Tooltip>
-    )
-  } else {
-    destructive = (
-      <Tooltip label="Delete all rows">
-        <button
-          type="button"
-          className="icon-btn-sm icon-btn-danger"
-          aria-label="Delete all rows"
-          onClick={() => guard('Delete ALL rows?', onDeleteAll)}
-        >
-          <Trash2 size={16} />
-        </button>
-      </Tooltip>
-    )
   }
 
   return (
@@ -111,14 +27,29 @@ export default function PeekActions({
       <Tooltip label="Reload data">
         <button
           type="button"
-          className="icon-btn-sm"
+          className="icon-btn-sm border border-sky-200 text-sky-600 sm:hover:bg-sky-50"
           onClick={onReload}
           aria-label="Reload data"
         >
           <RotateCcw size={16} />
         </button>
       </Tooltip>
-      {destructive}
+      {/* Full reset — only offered when there is no selection to act on, so it
+          never competes with the contextual Clear. */}
+      {kind === 'none' ? (
+        <Tooltip label="Reset the table (delete all rows & columns)">
+          <button
+            type="button"
+            className="icon-btn-sm icon-btn-danger border border-rose-200"
+            aria-label="Reset the table"
+            onClick={() =>
+              guard('Delete everything and reset to a blank table?', onDeleteAll)
+            }
+          >
+            <Trash2 size={16} />
+          </button>
+        </Tooltip>
+      ) : null}
     </>
   )
 }

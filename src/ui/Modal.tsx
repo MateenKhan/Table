@@ -1,4 +1,4 @@
-// VENDORED VERBATIM FROM piranha ui/src/components/Modal.tsx — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+// VENDORED VERBATIM FROM the shared UI (components/Modal.tsx — do NOT diverge; at import into the shared UI, delete src/ui/ and repoint to the originals.
 import React, { useEffect, useId, useRef } from 'react';
 import { Tooltip } from './Tooltip';
 import { X } from 'lucide-react';

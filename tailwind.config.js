@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 //
-// Tokens here mirror piranha's theme layer (ui/src/theme/theme.json) so this
+// Tokens here mirror the shared UI's theme layer (ui/src/theme/theme.json) so this
 // table drops into that app unchanged: the same class names (bg-white,
 // border-slate-200, rounded-lg, accent-500, min-h-control, sm:hover:...) resolve
 // to the same visuals in both places. See ui-rules.md §2/§3/§7/§16.
@@ -9,9 +9,9 @@
 // survive underneath, which is what keeps the existing utility classes working.
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
-  // Dark is an explicit attribute, never the OS preference — piranha is light by
+  // Dark is an explicit attribute, never the OS preference — the shared UI is light by
   // default (§1). We don't ship a dark toggle here, but the selector matches
-  // piranha so a dark preset would behave identically once imported.
+  // the shared UI so a dark preset would behave identically once imported.
   darkMode: ['selector', '[data-theme-mode="dark"]'],
   theme: {
     extend: {
@@ -31,14 +31,14 @@ export default {
           900: '#7e1d15',
           950: '#450a05',
         },
-        // ── Semantic category tokens for the VENDORED piranha components ──────
-        // (src/piranha/*: semanticColors.ts / SectionHeading / Modal). Those
+        // ── Semantic category tokens for the VENDORED the shared UI components ──────
+        // (src/ui/*: semanticColors.ts / SectionHeading / Modal). Those
         // files emit literal classes like `text-work-ink`, `bg-data-subtle`,
         // `border-agent-border`; without these keys those classes are no-ops.
         // Each category gets ink/subtle/border → `text-<c>-ink`,
         // `bg-<c>-subtle`, `border-<c>-border` (and `bg-<c>-ink` for dots).
         // Hexes are standard Tailwind palette steps (ink=700, subtle=50,
-        // border=200) chosen only so the class NAMES resolve — piranha's real
+        // border=200) chosen only so the class NAMES resolve — the shared UI's real
         // theme.json values apply at import. DELETE this block at import time.
         work: { ink: '#0369a1', subtle: '#f0f9ff', border: '#bae6fd' },      // sky
         data: { ink: '#4338ca', subtle: '#eef2ff', border: '#c7d2fe' },      // indigo

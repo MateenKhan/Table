@@ -1,4 +1,4 @@
-// Profile registry + composition. EXCLUDED from piranha import.
+// Profile registry + composition. EXCLUDED from the shared UI import.
 
 import { ColumnDef } from '@tanstack/react-table'
 import { interiorVertical } from './interior'

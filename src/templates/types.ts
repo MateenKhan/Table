@@ -1,11 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// PROFILES / TEMPLATES — jugaaadi-only, EXCLUDED from the piranha import.
-// See src/piranhaExcluded.ts.
+// PROFILES / TEMPLATES — optional per-site verticals.
+
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // A *profile* is just a named set of columns (+ starter rows): Cupboard, Table,
 // Bed, … Each is a piece of furniture / interior element. A *vertical* (Interior,
-// …) is the set of profiles a jugaaadi subdomain offers. The user multi-selects
+// …) is the set of profiles a site subdomain offers. The user multi-selects
 // profiles and they COMBINE into one sheet — see composeProfiles (model C).
 
 import { ColumnType, TypeOptions } from '../columnTypes'
@@ -34,7 +34,7 @@ export type Profile = {
 export type Vertical = {
   id: string
   name: string
-  // The hostname label that preloads this vertical (interior.jugaaadi.com).
+  // The hostname label that preloads this vertical (interior.example.com).
   subdomain: string
   profiles: Profile[]
   // Profile ids selected on first load. Empty = start with nothing selected.

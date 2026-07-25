@@ -1,7 +1,7 @@
 import { Column, RowData, SortingState, Table } from '@tanstack/react-table'
 import React from 'react'
 import { Check, X, Server } from 'lucide-react'
-import Tooltip from '../piranha/Tooltip'
+import Tooltip from '../ui/Tooltip'
 import {
   buildCommonSuggestions,
   canRuleOnType,

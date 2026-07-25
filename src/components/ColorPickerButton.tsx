@@ -3,11 +3,11 @@ import { createPortal } from 'react-dom'
 // react-colorful injects its own styles automatically (no CSS import needed —
 // the './dist/index.css' subpath isn't exported and breaks the prod build).
 import { HexColorPicker, HexColorInput } from 'react-colorful'
-import Tooltip from '../piranha/Tooltip'
+import Tooltip from '../ui/Tooltip'
 
 // A small icon button that opens a compact react-colorful popover. Reused by the
 // toolbar (ActionsBar) and the per-cell/column ops (CellContextPopup) so every
-// colour control in the app is one piranha-styled widget. The popover is
+// colour control in the app is one the shared UI-styled widget. The popover is
 // PORTALED to the body with fixed positioning, so it can never be clipped by a
 // scrolling/overflow ancestor (e.g. the action strip's overflow-x-auto).
 
@@ -103,7 +103,7 @@ export function ColorPickerButton({
           aria-label={label}
           aria-haspopup="dialog"
           aria-expanded={open}
-          className="icon-btn-sm"
+          className="icon-btn-sm border border-slate-300 sm:hover:bg-slate-100"
           onClick={() => setOpen((o) => !o)}
         >
           {icon ? (

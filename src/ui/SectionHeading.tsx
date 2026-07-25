@@ -1,4 +1,4 @@
-// VENDORED VERBATIM FROM piranha ui/src/components/SectionHeading.tsx — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+// VENDORED VERBATIM FROM the shared UI (components/SectionHeading.tsx — do NOT diverge; at import into the shared UI, delete src/ui/ and repoint to the originals.
 import React from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { ink, type SemanticCategory } from './semanticColors';

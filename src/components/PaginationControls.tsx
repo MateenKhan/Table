@@ -81,7 +81,7 @@ export function PaginationControls({
     e.currentTarget.select()
 
   return (
-    <div className="flex items-center gap-0.5 text-sm">
+    <div className="flex items-center gap-0 text-sm">
       {leadingControls}
 
       <button
@@ -91,7 +91,7 @@ export function PaginationControls({
         title="First page"
         aria-label="First page"
       >
-        {'<<'}
+        {'|<'}
       </button>
       <button
         className={CHEV}
@@ -104,7 +104,7 @@ export function PaginationControls({
       </button>
 
       {/* Current-page input — reads "3 / 100". */}
-      <div className="inline-flex items-center gap-0.5">
+      <div className="inline-flex items-center gap-0.5 px-0.5">
         <input
           className={`${NUM} !w-11`}
           type="text"
@@ -141,13 +141,15 @@ export function PaginationControls({
         title="Last page"
         aria-label="Last page"
       >
-        {'>>'}
+        {'>|'}
       </button>
 
-      {/* Page-size input — reads "10 rows". */}
-      <div className="ml-1 inline-flex items-center gap-0.5">
+      {/* Page-size input — the "rows" hint sits INSIDE the field as a tiny faint
+          suffix (right-padded so the value never overlaps it), rather than a
+          separate label outside. */}
+      <div className="relative ml-1 inline-flex items-center">
         <input
-          className={`${NUM} !w-14`}
+          className={`${NUM} !w-12 !pb-2.5 text-center`}
           type="text"
           inputMode="numeric"
           aria-label="Rows per page"
@@ -162,7 +164,9 @@ export function PaginationControls({
             }
           }}
         />
-        <span className="text-2xs text-slate-500">rows</span>
+        <span className="pointer-events-none absolute bottom-[1px] left-1/2 -translate-x-1/2 text-[7px] uppercase leading-none tracking-tight text-slate-400">
+          rows
+        </span>
       </div>
     </div>
   )

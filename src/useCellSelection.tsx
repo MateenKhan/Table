@@ -98,6 +98,10 @@ export type CellSelectionApi = {
   // through (column keys for a column selection, row keys for a row selection,
   // cell keys for a cell / range, etc.). Empty when nothing is selected.
   getFormatScopeKeys: () => string[]
+  // Clear the CONTENTS of whatever is currently selected — a cell, a range, a
+  // whole row / column, or the whole grid — emptying every writable cell and
+  // dropping its formula. No-op when nothing is selected. Undoable.
+  clearSelection: () => void
 }
 
 const CellSelectionContext = React.createContext<CellSelectionApi | null>(null)
@@ -1330,6 +1334,12 @@ export function CellSelectionProvider<T extends RowData>({
     previewNonce,
     selectionScope,
     getFormatScopeKeys,
+    // One unified clear for any selection — the rect already spans a cell, a
+    // range, a full row / column, or the whole grid, so clearing it empties
+    // exactly what the user picked.
+    clearSelection: () => {
+      if (rect) clearCells(rect)
+    },
   }
 
   return (

@@ -38,12 +38,12 @@ import {
   parseSnapshotFile,
   parseShareHtml,
 } from '../snapshot'
-import { Modal, useConfirm, useToast } from '../piranha'
-import { Tooltip } from '../piranha/Tooltip'
+import { Modal, useConfirm, useToast } from '../ui'
+import { Tooltip } from '../ui/Tooltip'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SettingsDialog — one home for the grid's saved state, inside the shared
-// piranha Modal, split across three tabs:
+// the shared UI Modal, split across three tabs:
 //   • Format profiles — named bundles of the grid's LOOK (colours, types,
 //     borders, fonts), saved to this browser and re-applied later. Never data.
 //   • Saved queries — named GlobalSearchValues, saved and recalled here.

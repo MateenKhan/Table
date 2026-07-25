@@ -27,7 +27,7 @@ import {
 } from '../formatting'
 import { formulaRefs, useFormulaRefsVersion } from '../formulaRefs'
 import CellContextStrip from './CellContextPopup'
-import { Plus } from 'lucide-react'
+import { Lock, Plus } from 'lucide-react'
 
 // Applied borders are rendered in TWO layers, because a `border-collapse` grid
 // makes plain per-side `<td>` borders unreliable:
@@ -176,8 +176,13 @@ function getCellPinningStyles<T extends RowData>(
 
   // `relative` (and `sticky`, below) make the cell a containing block so the
   // selection overlay and fill handle can be absolutely positioned inside it.
+  // `zIndex: 0` also makes the cell its OWN stacking context, which TRAPS the
+  // selection decoration (z 2/3) inside the cell — otherwise, with `z-index:
+  // auto`, that absolutely-positioned overlay escapes into the shared context
+  // and paints OVER the sticky header (z 3) when you scroll a selection up under
+  // it. A plain cell then sits at z 0, safely below every sticky header row.
   if (!isPinned) {
-    return { position: 'relative', width: cell.column.getSize() }
+    return { position: 'relative', zIndex: 0, width: cell.column.getSize() }
   }
 
   return {
@@ -214,6 +219,16 @@ type Props<T extends RowData> = {
   onPromoteRowToHeader?: (dataRowIndex: number) => void
   onInsertColumn?: (columnId: string, side: 'left' | 'right') => void
   onDeleteColumn?: (columnId: string) => void
+  // Remove a single selected row entirely (distinct from clearing its contents).
+  onDeleteRow?: (dataRowIndex: number) => void
+  // Font presets threaded into the contextual strip's FORMAT cluster: the size
+  // options and the family options. Passed to every strip so any selection can
+  // set them.
+  fontSizes?: string[]
+  fontFamilies?: { label: string; value: string }[]
+  // Merge a multi-column selection into one column. Wired into the format-only
+  // strip only when two or more columns are selected.
+  onMergeColumns?: (columnIds: string[]) => void
 }
 
 export function CustomTable<T extends RowData>({
@@ -225,6 +240,10 @@ export function CustomTable<T extends RowData>({
   onPromoteRowToHeader,
   onInsertColumn,
   onDeleteColumn,
+  onDeleteRow,
+  fontSizes,
+  fontFamilies,
+  onMergeColumns,
 }: Props<T>) {
   const selection = useCellSelection()
   // Re-render whenever any scope's colour / alignment changes.
@@ -314,6 +333,21 @@ export function CustomTable<T extends RowData>({
       return letter
     })
   })()
+
+  // "Blank sheet" mode is signalled by App wiring the header-rename handler —
+  // it is only passed for the user's custom (renamable) schema.
+  const customHeaderMode = !!onRenameColumn
+  // Has the user named ANY column yet? True once at least one leaf column has a
+  // non-empty string header. In blank-sheet mode every header starts as ''.
+  const someNamed = leafColumns.some((col) => {
+    const header = col.columnDef.header
+    return typeof header === 'string' && header !== ''
+  })
+  // The leaf column-NAME header row (with inline rename) is suppressed only in a
+  // brand-new blank sheet — no column named yet. Once any name exists (or this
+  // is an ordinary table) it renders exactly as before, so row 1 stays the first
+  // data row until the user actually names a column.
+  const showNameHeaderRow = !customHeaderMode || someNamed
 
   // Left-pinned columns must clear the row-number gutter; everything else is
   // untouched.
@@ -678,7 +712,20 @@ export function CustomTable<T extends RowData>({
               : undefined
           }
         >
-          {rowIndex + 1}
+          <span className="inline-flex items-center justify-center gap-0.5">
+            {rowIndex + 1}
+            {/* A locked (frozen/pinned) row shows a small muted lock glyph
+                beside its number; unpinned rows show just the number. */}
+            {row.getIsPinned() ? (
+              <span
+                title="Locked"
+                aria-label="Locked"
+                className="inline-flex text-slate-400"
+              >
+                <Lock size={11} aria-hidden="true" />
+              </span>
+            ) : null}
+          </span>
           {dataRowIndex >= 0 ? (
             <div
               className={rowGripClass}
@@ -860,6 +907,8 @@ export function CustomTable<T extends RowData>({
           onDeleteColumn={
             onDeleteColumn ? () => onDeleteColumn(columnId) : undefined
           }
+          fontSizes={fontSizes}
+          fontFamilies={fontFamilies}
         />
       )
     } else if (scope.kind === 'rows' && scope.rowIndices.length === 1) {
@@ -883,6 +932,11 @@ export function CustomTable<T extends RowData>({
               ? () => onPromoteRowToHeader(dataRowIndex)
               : undefined
           }
+          onDeleteRow={
+            onDeleteRow ? () => onDeleteRow(dataRowIndex) : undefined
+          }
+          fontSizes={fontSizes}
+          fontFamilies={fontFamilies}
         />
       )
     } else {
@@ -897,7 +951,21 @@ export function CustomTable<T extends RowData>({
               : scope.kind === 'rows'
                 ? `${scope.rowIndices.length} rows`
                 : 'Selection'
-      strip = <CellContextStrip scopeKeys={stripScopeKeys} title={stripTitle} />
+      strip = (
+        <CellContextStrip
+          scopeKeys={stripScopeKeys}
+          title={stripTitle}
+          fontSizes={fontSizes}
+          fontFamilies={fontFamilies}
+          onMergeColumns={
+            scope.kind === 'columns' &&
+            scope.columnIds.length >= 2 &&
+            onMergeColumns
+              ? () => onMergeColumns!(scope.columnIds)
+              : undefined
+          }
+        />
+      )
     }
   }
 
@@ -951,15 +1019,22 @@ export function CustomTable<T extends RowData>({
       >
       <table
         ref={tableRef}
-        className="border-collapse text-sm text-slate-700"
+        // `border-separate` (not `collapse`) with zero spacing: each hairline is
+        // then drawn by BOTH adjacent cells at the same position, so the grid
+        // line survives even when fractional zoom / low DPR rounds one side away
+        // (the "missing borders on mobile" bug). The applied-border overlay is
+        // absolute, so it is unaffected by the collapse-mode change.
+        className="border-separate border-spacing-0 text-sm text-slate-700"
       >
         <thead ref={theadRef}>
           {/* Coordinate-letter row + the corner "select all" cell. */}
           <tr>
             <th
               // Spans the full header height on the left, forming the corner
-              // where the letter row meets the row-number column.
-              rowSpan={headerRowCount + 1}
+              // where the letter row meets the row-number column. When the
+              // name-header rows are hidden (fresh blank sheet) only the letter
+              // row exists, so the corner spans just that one row.
+              rowSpan={showNameHeaderRow ? headerRowCount + 1 : 1}
               className={`${gutterCell} cursor-pointer select-none transition-colors sm:hover:bg-slate-200`}
               style={{
                 position: 'sticky',
@@ -1021,8 +1096,35 @@ export function CustomTable<T extends RowData>({
                 </th>
               )
             })}
+            {/* Add-column "+", now the trailing cell of the coordinate-letter
+                row so it is ALWAYS visible — even when the name-header row is
+                hidden on a fresh blank sheet. Each body row carries a matching
+                trailing spacer <td>, and the name-header row (when shown) an
+                empty trailing <th>, so the grid stays aligned. */}
+            {onAddColumn ? (
+              <th
+                className="bg-white border border-slate-200 p-0 align-middle"
+                style={{
+                  position: 'sticky',
+                  top: headerRowTops[0] ?? 0,
+                  zIndex: 5,
+                  width: 40,
+                  minWidth: 40,
+                }}
+              >
+                <button
+                  type="button"
+                  className="icon-btn-sm icon-btn-plain"
+                  title="Add column"
+                  aria-label="Add column"
+                  onClick={onAddColumn}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                </button>
+              </th>
+            ) : null}
           </tr>
-          {table.getHeaderGroups().map((headerGroup, headerRowIndex) => (
+          {showNameHeaderRow && table.getHeaderGroups().map((headerGroup, headerRowIndex) => (
             <tr key={headerGroup.id}>
               {headerGroup.headers.map((header) => {
                 // A placeholder is the empty continuation of a header that
@@ -1143,18 +1245,12 @@ export function CustomTable<T extends RowData>({
                               : undefined
                           }
                         >
-                          {canRename && headerLabel === '' ? (
-                            // Empty user header: a faint, non-data hint that keeps
-                            // the cell tall + double-clickable. Not a real value —
-                            // it never enters the model, and typing replaces it.
-                            <span className="italic text-slate-300">
-                              Name…
-                            </span>
-                          ) : (
-                            flexRender(
-                              header.column.columnDef.header,
-                              header.getContext(),
-                            )
+                          {/* An empty user header renders as empty string (no
+                              placeholder). Double-click still enters rename via
+                              the affordance on the wrapping span above. */}
+                          {flexRender(
+                            header.column.columnDef.header,
+                            header.getContext(),
                           )}
                         </span>
                         {header.column.getIsGrouped() ? (
@@ -1202,14 +1298,14 @@ export function CustomTable<T extends RowData>({
                   </th>
                 )
               })}
-              {/* Add-column "+", on the LEAF header row only (the row that holds
-                  the real column headers). It occupies one extra trailing column;
-                  each body row gets a matching empty <td> below so the grid stays
-                  aligned, and the coordinate-letter / group-parent rows simply
-                  leave that last column empty. */}
+              {/* Trailing spacer cell on the LEAF header row, aligning it with
+                  the coordinate row's "+" and each body row's spacer <td>. The
+                  add-column "+" itself now lives in the coordinate-letter row so
+                  it stays reachable even when this name-header row is hidden. */}
               {onAddColumn && headerRowIndex === headerRowCount - 1 ? (
                 <th
-                  className="bg-white border border-slate-200 p-0 align-middle"
+                  aria-hidden="true"
+                  className="bg-white border border-slate-200 align-middle"
                   style={{
                     position: 'sticky',
                     top: headerRowTops[headerRowIndex + 1] ?? 0,
@@ -1217,17 +1313,7 @@ export function CustomTable<T extends RowData>({
                     width: 40,
                     minWidth: 40,
                   }}
-                >
-                  <button
-                    type="button"
-                    className="icon-btn-sm icon-btn-plain"
-                    title="Add column"
-                    aria-label="Add column"
-                    onClick={onAddColumn}
-                  >
-                    <Plus size={16} aria-hidden="true" />
-                  </button>
-                </th>
+                />
               ) : null}
             </tr>
           ))}

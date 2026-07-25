@@ -1,4 +1,4 @@
-// VENDORED VERBATIM FROM piranha ui/src/theme/semanticColors.ts — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+// VENDORED VERBATIM FROM the shared UI (theme/semanticColors.ts — do NOT diverge; at import into the shared UI, delete src/ui/ and repoint to the originals.
 /**
  * THE SEMANTIC CATEGORY REGISTRY — "same concept → same colour, on every screen."
  * ══════════════════════════════════════════════════════════════════════════════════════════
@@ -6,7 +6,7 @@
  * WHY THIS EXISTS
  * ───────────────
  * The app was, in the owner's words, "only orange and white and grey". Every accent on every
- * page was the same Piranha orange-red, so nothing was distinguishable by hue: a cost figure, an
+ * page was the same the shared UI orange-red, so nothing was distinguishable by hue: a cost figure, an
  * error count and a task count all shouted with identical voices, and an icon added no
  * information the label next to it didn't already carry.
  *
@@ -19,7 +19,7 @@
  *
  * WHAT IT IS NOT
  * ──────────────
- * - It is **not** a replacement for the brand. Piranha orange-red (`accent-*`) stays tier-1
+ * - It is **not** a replacement for the brand. the shared UI orange-red (`accent-*`) stays tier-1
  *   IDENTITY and primary action, exactly as ui-rules.md §2 defines it. `brand` is listed here
  *   only so the registry can name it; nothing gets recoloured away from it.
  * - It is **not** a danger signal. `danger` is one category among ten and keeps the whole
@@ -82,7 +82,7 @@ export interface CategoryStyle {
  */
 export const CATEGORY: Record<SemanticCategory, CategoryStyle> = {
   brand: {
-    meaning: 'Piranha identity and the primary action. Unchanged tier-1 brand — see ui-rules.md §2.',
+    meaning: 'the shared UI identity and the primary action. Unchanged tier-1 brand — see ui-rules.md §2.',
     text: 'text-accent-600',
     bg: 'bg-accent-50',
     border: 'border-accent-200',

@@ -11,7 +11,7 @@ const LABELS: Record<ThumbnailSize, string> = {
   L: 'Large thumbnails, tall rows',
 }
 
-// Segmented S / M / L control. Borders and spacing follow the piranha design
+// Segmented S / M / L control. Borders and spacing follow the the shared UI design
 // system; the selected state uses the brand accent (tier-1 selection).
 export function ThumbnailSizeControl({ value, onChange }: Props) {
   return (

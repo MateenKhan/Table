@@ -1,5 +1,5 @@
 import React from 'react'
-import { Modal } from '../piranha'
+import { Modal } from '../ui'
 
 // One source of truth for the grid's keyboard shortcuts. The handlers in
 // `useCellSelection` implement these; this registry is what the help popup
@@ -87,8 +87,8 @@ function KeyCap({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * The `?` help popup: every grid shortcut, grouped, inside piranha's shared
- * <Modal> (src/piranha/Modal.tsx) — which owns the centred-card/bottom-sheet
+ * The `?` help popup: every grid shortcut, grouped, inside the shared UI's shared
+ * <Modal> (src/ui/Modal.tsx) — which owns the centred-card/bottom-sheet
  * shell, backdrop, Esc-to-close, focus management and body portal, so this
  * component carries only the shortcut content. Mounted conditionally by the
  * caller, so it is always "open" while rendered; `onClose` is the trigger's

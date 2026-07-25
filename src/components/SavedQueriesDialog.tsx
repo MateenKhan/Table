@@ -6,12 +6,12 @@ import {
   isGlobalSearchEmpty,
 } from '../globalSearch'
 import { savedQueries, useSavedQueriesVersion, SavedQuery } from '../savedQueries'
-import { Modal, useConfirm, useToast } from '../piranha'
-import { Tooltip } from '../piranha/Tooltip'
+import { Modal, useConfirm, useToast } from '../ui'
+import { Tooltip } from '../ui/Tooltip'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SavedQueriesDialog — CRUD for browser-stored queries, inside the shared
-// piranha Modal. Two regions: "Save current query" (name + Save, with an
+// the shared UI Modal. Two regions: "Save current query" (name + Save, with an
 // overwrite confirm), and a searchable, column-SORTABLE mini-table for finding,
 // loading, renaming and deleting saved queries. The Query column is rendered
 // with the very same `querySummary` the builder uses, so a saved query reads

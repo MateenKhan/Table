@@ -3,7 +3,7 @@ import { Vertical } from '../templates/types'
 
 // Multi-select of the active vertical's profiles (Cupboard, Table, Bed, …).
 // Picking several combines them into one sheet (see composeProfiles, model C).
-// EXCLUDED from the piranha import — see src/piranhaExcluded.ts.
+// An optional, lazily-loaded vertical (not part of the core table).
 
 type Props = {
   vertical: Vertical

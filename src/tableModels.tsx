@@ -91,14 +91,16 @@ export const columns: ColumnDef<Person>[] = [
   {
     id: 'select',
     header: ({ table }) => (
-      <IndeterminateCheckbox
-        checked={table.getIsAllRowsSelected()}
-        indeterminate={table.getIsSomeRowsSelected()}
-        onChange={table.getToggleAllRowsSelectedHandler()}
-      />
+      <div className="flex items-center justify-center">
+        <IndeterminateCheckbox
+          checked={table.getIsAllRowsSelected()}
+          indeterminate={table.getIsSomeRowsSelected()}
+          onChange={table.getToggleAllRowsSelectedHandler()}
+        />
+      </div>
     ),
     cell: ({ row }) => (
-      <div className="px-1">
+      <div className="flex items-center justify-center">
         <IndeterminateCheckbox
           checked={row.getIsSelected()}
           indeterminate={row.getIsSomeSelected()}

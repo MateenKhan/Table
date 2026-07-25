@@ -100,7 +100,7 @@ export function Accordion({
       </button>
 
       {/* Slide open/closed by animating the grid track 1fr <-> 0fr (§9, the same
-          technique piranha's CollapsibleHeader uses). The content is kept mounted
+          technique the shared UI's CollapsibleHeader uses). The content is kept mounted
           (not display:none) so a half-typed query survives a collapse, and the
           padding lives INSIDE the clipped track so it collapses with it. The
           global prefers-reduced-motion rule zeroes this transition. */}

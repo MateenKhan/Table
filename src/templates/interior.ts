@@ -1,4 +1,4 @@
-// Interior vertical — the first jugaaadi vertical. EXCLUDED from piranha import.
+// Interior vertical — an example domain vertical (interior-design sizes).
 //
 // Each profile is an interior element. Sizes (length/width/height, in mm) are the
 // shared dimensions every element has; profile-specific columns append after them.

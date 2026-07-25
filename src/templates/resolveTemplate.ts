@@ -1,5 +1,5 @@
 // Resolve which vertical/template to preload from the URL.
-// EXCLUDED from piranha import — piranha picks the template via its own props.
+// EXCLUDED from the shared UI import — the shared UI picks the template via its own props.
 
 import { getVertical } from './registry'
 import { Vertical } from './types'
@@ -9,7 +9,7 @@ import { Vertical } from './types'
  *
  * Order: `?template=` query param wins (the zero-config local-testing override —
  * `localhost:5173/?template=interior`), then the hostname's first label
- * (`interior.jugaaadi.com`, or `interior.localhost:5173` which Chrome resolves to
+ * (`interior.example.com`, or `interior.localhost:5173` which Chrome resolves to
  * loopback with no hosts-file edit). Plain `localhost` / `table.*` → null → default.
  */
 export function resolveVerticalId(loc: Location = window.location): string | null {

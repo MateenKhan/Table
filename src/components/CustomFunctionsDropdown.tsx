@@ -136,7 +136,7 @@ export function CustomFunctionsDropdown() {
     <div className="relative inline-block" ref={containerRef}>
       <button
         type="button"
-        className="icon-btn-sm relative"
+        className="icon-btn-sm relative border border-emerald-200 text-emerald-600 sm:hover:bg-emerald-50"
         onClick={() => setIsOpen((open) => !open)}
         title="Custom formula functions"
         aria-label="Custom formula functions"

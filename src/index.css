@@ -3,8 +3,8 @@
 @tailwind utilities;
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   Foundation — mirrors piranha ui/src/index.css so this table imports cleanly.
-   Light theme is the default (§1); every value traces to a piranha token (§16).
+   Foundation — mirrors the shared UI (index.css so this table imports cleanly.
+   Light theme is the default (§1); every value traces to a the shared UI token (§16).
    ──────────────────────────────────────────────────────────────────────────── */
 
 @layer base {
@@ -18,7 +18,7 @@
   }
 
   html {
-    /* piranha pins the root to 15px; rem values are authored against it (§3). */
+    /* the shared UI pins the root to 15px; rem values are authored against it (§3). */
     font-size: 15px;
   }
 

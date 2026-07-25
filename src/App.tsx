@@ -45,7 +45,11 @@ import {
   resolveColumnMeta,
   useColumnTypeOverridesVersion,
 } from './columnTypeOverrides'
-import { tableFormatting } from './formatting'
+import {
+  tableFormatting,
+  FONT_SIZE_OPTIONS,
+  FONT_FAMILY_OPTIONS,
+} from './formatting'
 import { useColumnTypeRegistryVersion } from './columnTypeRegistry'
 import CustomFunctionsDropdown, {
   loadStoredFunctions,
@@ -61,7 +65,8 @@ import useUndoHistory from './useUndoHistory'
 import GlobalSearch from './components/GlobalSearch'
 import PaginationControls from './components/PaginationControls'
 import CustomTable from './components/CustomTable'
-import TableActions from './components/TableActions'
+import DangerActions from './components/DangerActions'
+import ClearButton from './components/ClearButton'
 import StatsBar from './components/StatsBar'
 import FindReplaceDialog from './components/FindReplaceDialog'
 import SettingsDialog from './components/SettingsDialog'
@@ -76,7 +81,7 @@ import {
   clearCustomSheet,
 } from './sheetPersistence'
 
-// ── Profiles / templates (jugaaadi-only, EXCLUDED from the piranha import) ──────
+// ── Profiles / templates (optional, lazily-loaded site verticals) ──────
 // Behind a lazy boundary so a build that drops src/templates/* still works, and
 // so the default sheet never pays for this code.
 import { resolveVertical } from './templates/resolveTemplate'
@@ -102,7 +107,7 @@ function applyTypeOverrides<T>(defs: T[]): T[] {
 }
 
 export const App = () => {
-  // Which jugaaadi vertical the URL selected (null = default kitchen-sink sheet).
+  // Which vertical the URL selected (null = default kitchen-sink sheet).
   const activeVertical = React.useMemo(() => resolveVertical(), [])
 
   // A sheet the user previously built (Delete-all → filled in) survives reloads;
@@ -176,12 +181,16 @@ export const App = () => {
 
   // Re-seed the sheet whenever the profile selection changes (but not on first
   // mount — the useState initializer already seeded it).
-  const didMountRef = React.useRef(false)
+  // Re-seed only when the profile selection ACTUALLY changes. We compare the
+  // previous `composed` value rather than using a "skip first mount" flag: under
+  // React StrictMode the effect double-invokes on mount, and a flag-based guard
+  // would let the second pass fire and wipe a restored blank sheet. A value
+  // compare is inert on mount (and on the StrictMode remount) and runs only on a
+  // genuine profile change.
+  const prevComposedRef = React.useRef(composed)
   React.useEffect(() => {
-    if (!didMountRef.current) {
-      didMountRef.current = true
-      return
-    }
+    if (prevComposedRef.current === composed) return
+    prevComposedRef.current = composed
     setFormulas({})
     history.clear()
     releaseAllAttachments()
@@ -389,30 +398,6 @@ export const App = () => {
     },
     [data, deleteRows],
   )
-
-  const emptyColumns = React.useCallback((columnIds: string[]) => {
-    const cols = new Set(columnIds)
-    setData((prev) =>
-      prev.map((row) => {
-        const next = { ...row } as Record<string, unknown>
-        cols.forEach((c) => {
-          next[c] = ''
-        })
-        return next as Person
-      }),
-    )
-    // Drop any formulas living in the cleared columns.
-    setFormulas((prev) => {
-      let changed = false
-      const next: typeof prev = {}
-      for (const key of Object.keys(prev)) {
-        const colId = key.slice(key.indexOf(':') + 1)
-        if (cols.has(colId)) changed = true
-        else next[key] = prev[key]
-      }
-      return changed ? next : prev
-    })
-  }, [])
 
   const mergeColumns = React.useCallback((columnIds: string[]) => {
     if (columnIds.length < 2) return
@@ -742,8 +727,8 @@ export const App = () => {
   return (
     // One viewport: the toolbar keeps its natural height, the table region takes
     // the rest and scrolls on its own (§8 — only the table scrolls, not the page).
-    <div className="h-screen box-border p-2 sm:p-4 flex flex-col gap-2">
-      <div className="table-region flex-1 min-h-0">
+    <div className="h-screen w-full max-w-full overflow-hidden box-border p-2 sm:p-4 flex flex-col gap-2">
+      <div className="table-region min-w-0 flex-1 min-h-0">
         <ThumbnailSizeProvider size={isCustomSchema ? 'S' : thumbnailSize}>
           <CellSelectionProvider
             table={table}
@@ -768,13 +753,14 @@ export const App = () => {
                     />
                   </div>
                 }
+                ops={
+                  <div ref={setOpsSlot} className="min-w-0 empty:hidden" />
+                }
                 peek={
                   <>
                     <PeekActions
                       onReload={refreshData}
                       onDeleteAll={deleteAllTable}
-                      onDeleteRows={deleteRows}
-                      onEmptyColumns={emptyColumns}
                     />
                     <span
                       aria-hidden="true"
@@ -782,7 +768,7 @@ export const App = () => {
                     />
                     <button
                       type="button"
-                      className="icon-btn-sm"
+                      className="icon-btn-sm border border-amber-200 text-amber-600 sm:hover:bg-amber-50"
                       onClick={() => setFindOpen(true)}
                       title="Find & replace (Ctrl+H)"
                       aria-label="Find and replace"
@@ -792,7 +778,7 @@ export const App = () => {
                     <CustomFunctionsDropdown />
                     <button
                       type="button"
-                      className="icon-btn-sm"
+                      className="icon-btn-sm border border-slate-300 text-slate-600 sm:hover:bg-slate-100"
                       onClick={() => setSettingsOpen(true)}
                       title="Settings — profiles, saved queries, export & share"
                       aria-label="Settings"
@@ -801,7 +787,7 @@ export const App = () => {
                     </button>
                     <button
                       type="button"
-                      className="icon-btn-sm"
+                      className="icon-btn-sm border border-sky-200 text-sky-600 sm:hover:bg-sky-50"
                       onClick={openHelp}
                       title="Keyboard shortcuts (?)"
                       aria-label="Keyboard shortcuts"
@@ -811,19 +797,11 @@ export const App = () => {
                   </>
                 }
               >
-                {/* Selection-driven actions (delete/empty/merge/format/borders). */}
-                <TableActions
-                  data={data}
-                  onDeleteAllTable={deleteAllTable}
-                  onRestoreTable={refreshData}
-                  onDeleteRows={deleteRows}
-                  onEmptyColumns={emptyColumns}
-                  onMergeColumns={mergeColumns}
-                />
-
+                {/* Selection formatting/merge lives entirely in the contextual
+                    strip now (no duplicate FORMAT bar). */}
                 {activeVertical && (
                   <React.Suspense fallback={null}>
-                    <ControlGroup label="Profiles">
+                    <ControlGroup label="Profiles" tone="violet">
                       <TemplateSelector
                         vertical={activeVertical}
                         selectedIds={selectedProfileIds}
@@ -833,7 +811,7 @@ export const App = () => {
                   </React.Suspense>
                 )}
 
-                <ControlGroup label="Pagination">
+                <ControlGroup label="Pagination" tone="sky">
                   <PaginationControls
                     hasNextPage={table.getCanNextPage()}
                     hasPreviousPage={table.getCanPreviousPage()}
@@ -847,10 +825,10 @@ export const App = () => {
                   />
                 </ControlGroup>
 
-                <ControlGroup label="Tools">
+                <ControlGroup label="Tools" tone="emerald">
                   <button
                     type="button"
-                    className="icon-btn-sm"
+                    className="icon-btn-sm border border-amber-200 text-amber-600 sm:hover:bg-amber-50"
                     onClick={() => setFindOpen(true)}
                     title="Find & replace (Ctrl+H)"
                     aria-label="Find and replace"
@@ -860,7 +838,7 @@ export const App = () => {
                   <CustomFunctionsDropdown />
                   <button
                     type="button"
-                    className="icon-btn-sm"
+                    className="icon-btn-sm border border-slate-300 text-slate-600 sm:hover:bg-slate-100"
                     onClick={() => setSettingsOpen(true)}
                     title="Settings — profiles, saved queries, export & share"
                     aria-label="Settings"
@@ -869,7 +847,7 @@ export const App = () => {
                   </button>
                   <button
                     type="button"
-                    className="icon-btn-sm"
+                    className="icon-btn-sm border border-sky-200 text-sky-600 sm:hover:bg-sky-50"
                     onClick={openHelp}
                     title="Keyboard shortcuts (?)"
                     aria-label="Keyboard shortcuts"
@@ -877,10 +855,18 @@ export const App = () => {
                     <HelpCircle size={16} />
                   </button>
                 </ControlGroup>
+
+                {/* Danger zone — Clear the selection's contents (shown only when
+                    something is selected, before Restore), then the two heavy
+                    whole-table actions, red-bordered so they read as dangerous. */}
+                <ControlGroup label="Danger" tone="rose">
+                  <ClearButton />
+                  <DangerActions
+                    onDeleteAllTable={deleteAllTable}
+                    onRestoreTable={refreshData}
+                  />
+                </ControlGroup>
               </ActionsRow>
-              {/* The contextual ops strip portals here — part of the actions div,
-                  not the table. */}
-              <div ref={setOpsSlot} className="shrink-0 empty:hidden" />
               <div className="min-h-0 flex-1">
                 <CustomTable
                   table={table}
@@ -893,6 +879,10 @@ export const App = () => {
                   }
                   onInsertColumn={isCustomSchema ? insertColumn : undefined}
                   onDeleteColumn={isCustomSchema ? deleteColumn : undefined}
+                  onDeleteRow={(dataRowIndex) => deleteRows([dataRowIndex])}
+                  fontSizes={[...FONT_SIZE_OPTIONS]}
+                  fontFamilies={[...FONT_FAMILY_OPTIONS]}
+                  onMergeColumns={mergeColumns}
                 />
               </div>
               {/* Excel-style aggregates of the current selection. */}

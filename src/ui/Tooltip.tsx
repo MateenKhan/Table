@@ -1,4 +1,4 @@
-// VENDORED VERBATIM FROM piranha ui/src/pages/tasks/components/Tooltip.tsx — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+// VENDORED VERBATIM FROM the shared UI (pages/tasks/components/Tooltip.tsx — do NOT diverge; at import into the shared UI, delete src/ui/ and repoint to the originals.
 import { useState, useRef, useCallback, useLayoutEffect, isValidElement, cloneElement, type ReactNode, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 

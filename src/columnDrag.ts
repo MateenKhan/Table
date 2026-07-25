@@ -322,7 +322,7 @@ export function planShift(
 // no DOM, no globals) so the reduced-motion + easing decision is a single,
 // unit-testable source of truth that `useColumnDrag.ts` consumes.
 //
-// Piranha motion rules (ui-rules.md §9):
+// Motion rules (reduced-motion aware):
 //  - `prefers-reduced-motion: reduce` MUST be honored. The transitions below
 //    are injected from JS into a <style> element, so they BYPASS index.css's
 //    global media query the same way Framer's rAF transforms do (§9's warning).
@@ -336,7 +336,7 @@ export function planShift(
 /** Drop-into-place settle duration, in ms. Inside §9's fast/normal band. */
 export const SETTLE_MS = 180
 
-/** Piranha's "standard" ease-in-out curve (never `linear`, never a hard cut). */
+/** The "standard" ease-in-out curve (never `linear`, never a hard cut). */
 export const STANDARD_EASE = 'cubic-bezier(0.2, 0, 0, 1)'
 
 /**

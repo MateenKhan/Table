@@ -12,13 +12,16 @@ import {
   Ban,
   Check,
   ChevronDown,
+  Combine,
   Eye,
   EyeOff,
+  FunctionSquare,
   Group,
   PaintBucket,
   Pin,
   PinOff,
   RotateCcw,
+  Rows3,
   SlidersHorizontal,
   Trash2,
   Ungroup,
@@ -47,14 +50,16 @@ import BorderControl from './BorderControl'
 // currently selected. No `x`/`y`, no viewport clamp, no Esc / outside-close, no
 // `role="dialog"` — it is part of the layout, not a transient overlay.
 //
-// It carries the exact same operations it always has:
+// It carries the exact same operations it always has, now folded into ONE
+// captioned "Format" group whose icons appear / disappear with the selection:
 //   • Column target → column type (ColumnTypePicker), hide, pin / sort / group
-//     (in a small "Arrange" dropdown), show-hidden-columns (a dropdown), plus
-//     the shared format cluster and an "Enter formula" jump.
-//   • Row target → freeze / unfreeze, row-height presets, plus the format cluster.
-//   • Cell / range / whole-grid target → the format cluster only.
-// The format cluster (background / text colour, alignment, borders) is always
-// present and writes across EVERY scope key the current selection maps to.
+//     (in a small "Arrange" dropdown), show-hidden-columns (a dropdown), the
+//     structural insert / delete-column ops, plus an "Enter formula" jump.
+//   • Row target → use-as-header, freeze / unfreeze, row-height (a dropdown),
+//     delete-row.
+//   • Cell / range / whole-grid target → the always-present format controls.
+// The format controls (background / text colour, alignment, font, borders) are
+// always present and write across EVERY scope key the current selection maps to.
 //
 // Writes still go straight to the `tableFormatting` singleton (and
 // `columnTypeOverrides` / the TanStack `column` / `table`); the store is the
@@ -87,11 +92,12 @@ const FG_SWATCHES = [
 
 // Row-height presets. These mirror the S / M / L body-row heights the removed
 // "Rows S/M/L" toolbar control set (see THUMBNAIL_METRICS), so a per-row height
-// picked here lines up exactly with the old global sizes.
-const ROW_HEIGHT_PRESETS: { label: string; value: number }[] = [
-  { label: 'Short', value: 26 },
-  { label: 'Medium', value: 56 },
-  { label: 'Tall', value: 108 },
+// picked here lines up exactly with the old global sizes. `name` is the readable
+// label shown in the row-height dropdown menu.
+const ROW_HEIGHT_PRESETS: { label: string; name: string; value: number }[] = [
+  { label: 'S', name: 'Short', value: 26 },
+  { label: 'M', name: 'Medium', value: 56 },
+  { label: 'L', name: 'Tall', value: 108 },
 ]
 
 type Props<T extends RowData> = {
@@ -119,13 +125,24 @@ type Props<T extends RowData> = {
   isRowPinned?: boolean
   onToggleRowPin?: () => void
   // Row-target only: promote this single row's values to the column headers and
-  // then remove the row. Rendered in the ROW strip when wired.
+  // then remove the row. Rendered in the Format group when wired.
   onPromoteToHeader?: () => void
-  // Column-target only: structural column operations. Each renders in the COLUMN
-  // strip only when its callback is wired.
+  // Column-target only: structural column operations. Each renders in the Format
+  // group only when its callback is wired.
   onInsertColumnLeft?: () => void
   onInsertColumnRight?: () => void
   onDeleteColumn?: () => void
+  // Row-target only: remove the row entirely (Clear now lives beside the Danger
+  // group, not on the strip). Rendered in the Format group when wired.
+  onDeleteRow?: () => void
+  // Format controls: available font-size presets and font-family options. Each
+  // renders a compact select inside the Format box only when its array is
+  // non-empty, so a caller can offer size, family, both, or neither.
+  fontSizes?: string[]
+  fontFamilies?: { label: string; value: string }[]
+  // Multi-column target only: merge the selected columns into one. Renders a
+  // standalone violet Merge button when wired.
+  onMergeColumns?: () => void
 }
 
 const ALIGNMENTS: { value: Align; label: string }[] = [
@@ -133,6 +150,12 @@ const ALIGNMENTS: { value: Align; label: string }[] = [
   { value: 'center', label: 'Align centre' },
   { value: 'right', label: 'Align right' },
 ]
+
+// A thin vertical hairline between logical runs of controls inside the Format
+// group. Kept as a helper so every run separates the same way.
+function RunDivider() {
+  return <span aria-hidden className="mx-0.5 h-5 w-px bg-slate-200" />
+}
 
 // A readable label for a column: its string header if it has one, else its id.
 // Hidden columns have no on-screen header to read, so this is what the
@@ -206,9 +229,50 @@ function MenuDivider() {
   return <div className="my-1 border-t border-slate-200" />
 }
 
-// Vertical hairline between clusters on the strip itself.
-function ClusterDivider() {
-  return <span aria-hidden="true" className="mx-1 h-6 w-px shrink-0 bg-slate-200" />
+// A compact, named, colored-outline wrapper around one logical cluster of strip
+// controls. Mirrors the grouped clusters in the rest of the toolbar (e.g.
+// "PAGINATION" sky / "TOOLS" emerald): a thin tinted border, a tiny uppercase
+// caption inline at the front, and the cluster's buttons after it. Inline (not a
+// tall overlapping caption) because this strip lives on a single row. All tone
+// classes are spelled out as literals so Tailwind keeps them in the build.
+function ClusterBox({
+  name,
+  tone,
+  children,
+}: {
+  name: string
+  tone: 'teal' | 'amber' | 'violet' | 'sky' | 'emerald'
+  children: React.ReactNode
+}) {
+  const border = {
+    teal: 'border-teal-200',
+    amber: 'border-amber-200',
+    violet: 'border-violet-200',
+    sky: 'border-sky-200',
+    emerald: 'border-emerald-200',
+  }[tone]
+  const text = {
+    teal: 'text-teal-600',
+    amber: 'text-amber-600',
+    violet: 'text-violet-600',
+    sky: 'text-sky-600',
+    emerald: 'text-emerald-600',
+  }[tone]
+  // Same captioned-outline look as ControlGroup (Pagination / Tools / Danger):
+  // the name overlaps the top border, masked by a matching white background.
+  // Extra top room (mt-1 + pt-2) keeps the -top-2 caption clear of the icon row.
+  return (
+    <div
+      className={`relative mt-1 inline-flex shrink-0 items-center gap-1 rounded-lg border ${border} bg-white px-2 pb-1 pt-2`}
+    >
+      <span
+        className={`absolute -top-2 left-2 bg-white px-1 text-[10px] font-semibold uppercase tracking-wide ${text}`}
+      >
+        {name}
+      </span>
+      {children}
+    </div>
+  )
 }
 
 // A compact strip button that opens a small menu panel. The panel is rendered
@@ -216,6 +280,8 @@ function ClusterDivider() {
 // to the viewport) so it is never clipped by the strip's own `overflow-x-auto`
 // — the same trick BorderControl uses. Esc / outside pointer-down close it, and
 // the render-prop hands children a `close()` so an item can dismiss the menu.
+// `label` is optional: omit it for an icon-only trigger (still fully labelled
+// for a11y via `ariaLabel`, which also becomes the hover tooltip).
 function StripMenu({
   label,
   icon: Icon,
@@ -223,7 +289,7 @@ function StripMenu({
   disabled = false,
   children,
 }: {
-  label: string
+  label?: string
   icon?: LucideIcon
   ariaLabel: string
   disabled?: boolean
@@ -304,6 +370,7 @@ function StripMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={ariaLabel}
+        title={ariaLabel}
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         className={`flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-sm transition-colors disabled:pointer-events-none disabled:opacity-40 sm:hover:bg-slate-50 ${
@@ -311,7 +378,7 @@ function StripMenu({
         }`}
     >
         {Icon ? <Icon size={15} className="flex-none text-slate-500" /> : null}
-        <span className="truncate">{label}</span>
+        {label ? <span className="truncate">{label}</span> : null}
         <ChevronDown size={13} className="flex-none text-slate-400" />
       </button>
 
@@ -339,7 +406,6 @@ function StripMenu({
 
 export function CellContextStrip<T extends RowData>({
   scopeKeys,
-  title,
   onEnterFormula,
   table,
   column,
@@ -351,6 +417,10 @@ export function CellContextStrip<T extends RowData>({
   onInsertColumnLeft,
   onInsertColumnRight,
   onDeleteColumn,
+  onDeleteRow,
+  fontSizes,
+  fontFamilies,
+  onMergeColumns,
 }: Props<T>) {
   // Subscribe so swatch selection / clearing reflects instantly.
   useFormatVersion()
@@ -369,6 +439,10 @@ export function CellContextStrip<T extends RowData>({
     scopeKeys.forEach((key) => tableFormatting.update(key, { align }))
   const setBorders = (borders: Borders) =>
     scopeKeys.forEach((key) => tableFormatting.update(key, { borders }))
+  const setFontSize = (fontSize?: string) =>
+    scopeKeys.forEach((k) => tableFormatting.update(k, { fontSize }))
+  const setFontFamily = (fontFamily?: string) =>
+    scopeKeys.forEach((k) => tableFormatting.update(k, { fontFamily }))
 
   // ── Column operations (the removed "Columns" dropdown's job) ───────────────
   const sorted = column?.getIsSorted() // false | 'asc' | 'desc'
@@ -391,203 +465,287 @@ export function CellContextStrip<T extends RowData>({
     resolvedMeta?.type ??
     'Text'
 
-  // Clusters are assembled into an array so hairline dividers can be interleaved
-  // between exactly the ones that are present (no leading / trailing divider).
-  const clusters: React.ReactNode[] = []
+  // Which conditional runs are present drives whether a leading divider shows.
+  const hasColumnRun =
+    !!column || !!onInsertColumnLeft || !!onInsertColumnRight || !!onDeleteColumn
+  const hasRowRun =
+    !!onPromoteToHeader ||
+    !!onToggleRowPin ||
+    !!onSetRowHeight ||
+    !!onDeleteRow
 
-  // Column type.
-  if (column) {
-    clusters.push(
-      <div key="type" className="flex shrink-0 items-center gap-1">
-        <span className="text-2xs font-semibold uppercase tracking-wide text-slate-400">
-          Type
-        </span>
-        <div className="w-44">
-          <ColumnTypePicker
-            value={currentPresetId}
-            typeLabel={typeLabel}
-            onSelect={(presetId) => columnTypeOverrides.set(column.id, presetId)}
-          />
-        </div>
-        {typeOverride ? (
-          <button
-            type="button"
-            className="icon-btn-sm"
-            title="Reset to default"
-            aria-label="Reset column type to default"
-            onClick={() => columnTypeOverrides.set(column.id, null)}
+  // ONE captioned group. The always-present format controls lead; the column /
+  // merge / row / formula runs fold in after, each gated on its own props /
+  // target so a control appears exactly when it is relevant. Every control is
+  // icon-only (selects excepted, since they surface their current value); hover
+  // for the tooltip.
+  return (
+    <div className="custom-scrollbar flex w-full items-center gap-2 overflow-x-auto px-2 py-1.5 text-sm text-slate-700">
+      <ClusterBox key="format" name="Format" tone="teal">
+        {/* ── ALWAYS: fill / text colour ───────────────────────────────── */}
+        <ColorPickerButton
+          label="Background color"
+          value={format.bg}
+          onChange={setBg}
+          swatches={BG_SWATCHES}
+          icon={<PaintBucket size={16} className="text-sky-600" />}
+        />
+        <ColorPickerButton
+          label="Text color"
+          value={format.fg}
+          onChange={setFg}
+          swatches={FG_SWATCHES}
+          icon={<Baseline size={16} className="text-violet-600" />}
+        />
+        <RunDivider />
+        {/* ── ALWAYS: alignment / font ─────────────────────────────────── */}
+        {ALIGNMENTS.map(({ value, label }) => {
+          const active = format.align === value
+          return (
+            <button
+              key={value}
+              type="button"
+              title={label}
+              aria-label={label}
+              aria-pressed={active}
+              className={`icon-btn-sm border ${
+                active
+                  ? 'border-accent-300 bg-accent-500/10 text-accent-600'
+                  : 'border-slate-300 text-teal-600 sm:hover:bg-slate-100'
+              }`}
+              onClick={() => setAlign(active ? undefined : value)}
+            >
+              <AlignGlyph dir={value} />
+            </button>
+          )
+        })}
+        {fontSizes && fontSizes.length ? (
+          <select
+            className="select-sm !w-[4.5rem] pr-5 text-slate-600 border-slate-300"
+            aria-label="Font size"
+            title="Font size"
+            value={format.fontSize ?? ''}
+            onChange={(event) => setFontSize(event.target.value || undefined)}
           >
-            <RotateCcw size={15} />
-          </button>
+            <option value="">15px</option>
+            {fontSizes.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
         ) : null}
-      </div>,
-    )
-  }
+        {fontFamilies && fontFamilies.length ? (
+          <select
+            className="select-sm !w-[5rem] pr-5 text-slate-600 border-slate-300"
+            aria-label="Font family"
+            title="Font family"
+            value={format.fontFamily ?? ''}
+            onChange={(event) => setFontFamily(event.target.value || undefined)}
+          >
+            <option value="">Sans</option>
+            {fontFamilies.map((family) => (
+              <option key={family.value} value={family.value}>
+                {family.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        <RunDivider />
+        {/* ── ALWAYS: borders ──────────────────────────────────────────── */}
+        <BorderControl
+          onApply={(patch) => setBorders(patch.borders)}
+          currentBorders={format.borders}
+        />
 
-  // Column ops: hide + an "Arrange" (pin / sort / group) menu + a
-  // "Show hidden columns" menu.
-  if (column) {
-    clusters.push(
-      <div key="colops" className="flex shrink-0 items-center gap-1">
-        <button
-          type="button"
-          className="icon-btn-sm"
-          title="Hide column"
-          aria-label="Hide column"
-          onClick={() => column.toggleVisibility(false)}
-        >
-          <EyeOff size={16} />
-        </button>
+        {/* ── WHEN a single column is the target: type / arrange / hide /
+            show-hidden, and the structural insert / delete-column ops. ──── */}
+        {hasColumnRun ? <RunDivider /> : null}
+        {column ? (
+          <>
+            <span className="text-2xs font-semibold uppercase tracking-wide text-slate-400">
+              Type
+            </span>
+            <div className="w-44">
+              <ColumnTypePicker
+                value={currentPresetId}
+                typeLabel={typeLabel}
+                onSelect={(presetId) =>
+                  columnTypeOverrides.set(column.id, presetId)
+                }
+              />
+            </div>
+            {typeOverride ? (
+              <button
+                type="button"
+                className="icon-btn-sm text-slate-600"
+                title="Reset to default"
+                aria-label="Reset column type to default"
+                onClick={() => columnTypeOverrides.set(column.id, null)}
+              >
+                <RotateCcw size={15} />
+              </button>
+            ) : null}
 
-        <StripMenu label="Arrange" icon={SlidersHorizontal} ariaLabel="Pin, sort and group">
-          {(close) => (
-            <>
-              {column.getCanPin() ? (
+            <button
+              type="button"
+              className="icon-btn-sm text-slate-600"
+              title="Hide column"
+              aria-label="Hide column"
+              onClick={() => column.toggleVisibility(false)}
+            >
+              <EyeOff size={16} />
+            </button>
+
+            <StripMenu
+              label="Arrange"
+              icon={SlidersHorizontal}
+              ariaLabel="Pin, sort and group"
+            >
+              {(close) => (
                 <>
+                  {column.getCanPin() ? (
+                    <>
+                      <MenuItem
+                        icon={ArrowLeftToLine}
+                        label="Pin left"
+                        active={pinned === 'left'}
+                        onClick={() => {
+                          column.pin(pinned === 'left' ? false : 'left')
+                          close()
+                        }}
+                      />
+                      <MenuItem
+                        icon={ArrowRightToLine}
+                        label="Pin right"
+                        active={pinned === 'right'}
+                        onClick={() => {
+                          column.pin(pinned === 'right' ? false : 'right')
+                          close()
+                        }}
+                      />
+                      {pinned ? (
+                        <MenuItem
+                          icon={PinOff}
+                          label="Unpin"
+                          onClick={() => {
+                            column.pin(false)
+                            close()
+                          }}
+                        />
+                      ) : null}
+                      <MenuDivider />
+                    </>
+                  ) : null}
+
                   <MenuItem
-                    icon={ArrowLeftToLine}
-                    label="Pin left"
-                    active={pinned === 'left'}
+                    icon={ArrowUpNarrowWide}
+                    label="Sort ascending"
+                    active={sorted === 'asc'}
                     onClick={() => {
-                      column.pin(pinned === 'left' ? false : 'left')
+                      column.toggleSorting(false)
                       close()
                     }}
                   />
                   <MenuItem
-                    icon={ArrowRightToLine}
-                    label="Pin right"
-                    active={pinned === 'right'}
+                    icon={ArrowDownWideNarrow}
+                    label="Sort descending"
+                    active={sorted === 'desc'}
                     onClick={() => {
-                      column.pin(pinned === 'right' ? false : 'right')
+                      column.toggleSorting(true)
                       close()
                     }}
                   />
-                  {pinned ? (
+                  {sorted ? (
                     <MenuItem
-                      icon={PinOff}
-                      label="Unpin"
+                      icon={Ban}
+                      label="Clear sort"
                       onClick={() => {
-                        column.pin(false)
+                        column.clearSorting()
                         close()
                       }}
                     />
                   ) : null}
-                  <MenuDivider />
+
+                  {column.getCanGroup() ? (
+                    <>
+                      <MenuDivider />
+                      {column.getIsGrouped() ? (
+                        <MenuItem
+                          icon={Ungroup}
+                          label="Ungroup"
+                          active
+                          onClick={() => {
+                            column.getToggleGroupingHandler()()
+                            close()
+                          }}
+                        />
+                      ) : (
+                        <MenuItem
+                          icon={Group}
+                          label="Group by this column"
+                          onClick={() => {
+                            column.getToggleGroupingHandler()()
+                            close()
+                          }}
+                        />
+                      )}
+                    </>
+                  ) : null}
                 </>
-              ) : null}
+              )}
+            </StripMenu>
 
-              <MenuItem
-                icon={ArrowUpNarrowWide}
-                label="Sort ascending"
-                active={sorted === 'asc'}
-                onClick={() => {
-                  column.toggleSorting(false)
-                  close()
-                }}
-              />
-              <MenuItem
-                icon={ArrowDownWideNarrow}
-                label="Sort descending"
-                active={sorted === 'desc'}
-                onClick={() => {
-                  column.toggleSorting(true)
-                  close()
-                }}
-              />
-              {sorted ? (
-                <MenuItem
-                  icon={Ban}
-                  label="Clear sort"
-                  onClick={() => {
-                    column.clearSorting()
-                    close()
-                  }}
-                />
-              ) : null}
-
-              {column.getCanGroup() ? (
-                <>
-                  <MenuDivider />
-                  {column.getIsGrouped() ? (
+            {/* Show hidden columns — the ONLY way back for a column with no
+                header left to click, so it stays reachable from every column. */}
+            <StripMenu
+              label={
+                hiddenColumns.length
+                  ? `Hidden (${hiddenColumns.length})`
+                  : 'No hidden'
+              }
+              icon={Eye}
+              ariaLabel="Show hidden columns"
+              disabled={hiddenColumns.length === 0}
+            >
+              {(close) => (
+                <div className="max-h-64 overflow-y-auto">
+                  {hiddenColumns.map((leaf) => (
                     <MenuItem
-                      icon={Ungroup}
-                      label="Ungroup"
-                      active
+                      key={leaf.id}
+                      icon={Eye}
+                      label={columnLabel(leaf)}
                       onClick={() => {
-                        column.getToggleGroupingHandler()()
+                        leaf.toggleVisibility(true)
                         close()
                       }}
                     />
-                  ) : (
-                    <MenuItem
-                      icon={Group}
-                      label="Group by this column"
-                      onClick={() => {
-                        column.getToggleGroupingHandler()()
-                        close()
-                      }}
-                    />
-                  )}
-                </>
-              ) : null}
-            </>
-          )}
-        </StripMenu>
+                  ))}
+                  {hiddenColumns.length > 1 ? (
+                    <>
+                      <MenuDivider />
+                      <MenuItem
+                        icon={Eye}
+                        label="Show all"
+                        onClick={() => {
+                          hiddenColumns.forEach((leaf) =>
+                            leaf.toggleVisibility(true),
+                          )
+                          close()
+                        }}
+                      />
+                    </>
+                  ) : null}
+                </div>
+              )}
+            </StripMenu>
+          </>
+        ) : null}
 
-        {/* Show hidden columns — the ONLY way back for a column with no header
-            left to click, so it stays reachable from every column's strip. */}
-        <StripMenu
-          label={
-            hiddenColumns.length
-              ? `Hidden (${hiddenColumns.length})`
-              : 'No hidden'
-          }
-          icon={Eye}
-          ariaLabel="Show hidden columns"
-          disabled={hiddenColumns.length === 0}
-        >
-          {(close) => (
-            <div className="max-h-64 overflow-y-auto">
-              {hiddenColumns.map((leaf) => (
-                <MenuItem
-                  key={leaf.id}
-                  icon={Eye}
-                  label={columnLabel(leaf)}
-                  onClick={() => {
-                    leaf.toggleVisibility(true)
-                    close()
-                  }}
-                />
-              ))}
-              {hiddenColumns.length > 1 ? (
-                <>
-                  <MenuDivider />
-                  <MenuItem
-                    icon={Eye}
-                    label="Show all"
-                    onClick={() => {
-                      hiddenColumns.forEach((leaf) => leaf.toggleVisibility(true))
-                      close()
-                    }}
-                  />
-                </>
-              ) : null}
-            </div>
-          )}
-        </StripMenu>
-      </div>,
-    )
-  }
-
-  // Column structural ops: insert a column left / right of this one, delete this
-  // column. Each button renders only when its callback is wired.
-  if (onInsertColumnLeft || onInsertColumnRight || onDeleteColumn) {
-    clusters.push(
-      <div key="colstruct" className="flex shrink-0 items-center gap-1">
         {onInsertColumnLeft ? (
           <button
             type="button"
-            className="icon-btn-sm"
+            className="icon-btn-sm text-teal-600"
             title="Insert column left"
             aria-label="Insert column left"
             onClick={onInsertColumnLeft}
@@ -598,7 +756,7 @@ export function CellContextStrip<T extends RowData>({
         {onInsertColumnRight ? (
           <button
             type="button"
-            className="icon-btn-sm"
+            className="icon-btn-sm text-teal-600"
             title="Insert column right"
             aria-label="Insert column right"
             onClick={onInsertColumnRight}
@@ -609,7 +767,7 @@ export function CellContextStrip<T extends RowData>({
         {onDeleteColumn ? (
           <button
             type="button"
-            className="icon-btn-sm text-slate-500 sm:hover:bg-rose-50 sm:hover:text-rose-600"
+            className="icon-btn-sm text-rose-600 sm:hover:bg-rose-50 sm:hover:text-rose-600"
             title="Delete column"
             aria-label="Delete column"
             onClick={onDeleteColumn}
@@ -617,147 +775,102 @@ export function CellContextStrip<T extends RowData>({
             <Trash2 size={16} />
           </button>
         ) : null}
-      </div>,
-    )
-  }
 
-  // Promote row to header (row target): use this row's values as the column
-  // headers, then remove the row.
-  if (onPromoteToHeader) {
-    clusters.push(
-      <div key="promote" className="flex shrink-0 items-center gap-1">
-        <button
-          type="button"
-          className="btn-ghost-sm whitespace-nowrap"
-          title="Use this row's values as column headers, then remove the row"
-          aria-label="Use as header"
-          onClick={onPromoteToHeader}
-        >
-          <ArrowUpToLine size={16} aria-hidden="true" />
-          Use as header
-        </button>
-      </div>,
-    )
-  }
-
-  // Freeze / unfreeze (row target).
-  if (onToggleRowPin) {
-    clusters.push(
-      <div key="freeze" className="flex shrink-0 items-center gap-1">
-        <button
-          type="button"
-          aria-pressed={isRowPinned}
-          className={`icon-btn-sm ${
-            isRowPinned ? 'bg-accent-500/10 text-accent-600' : ''
-          }`}
-          title={isRowPinned ? 'Unfreeze row' : 'Freeze row'}
-          aria-label={isRowPinned ? 'Unfreeze row' : 'Freeze row'}
-          onClick={onToggleRowPin}
-        >
-          {isRowPinned ? <PinOff size={16} /> : <Pin size={16} />}
-        </button>
-      </div>,
-    )
-  }
-
-  // Row-height presets (row target).
-  if (onSetRowHeight) {
-    clusters.push(
-      <div key="height" className="flex shrink-0 items-center gap-1">
-        <span className="text-2xs font-semibold uppercase tracking-wide text-slate-400">
-          Height
-        </span>
-        {ROW_HEIGHT_PRESETS.map(({ label, value }) => {
-          const active = rowHeight === value
-          return (
+        {/* ── WHEN multi-column: merge the selected columns ────────────── */}
+        {onMergeColumns ? (
+          <>
+            <RunDivider />
             <button
-              key={label}
               type="button"
-              aria-pressed={active}
-              className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
-                active
-                  ? 'border-accent-200 bg-accent-500/10 text-accent-600'
-                  : 'border-slate-200 text-slate-700 sm:hover:bg-slate-50'
-              }`}
-              onClick={() => onSetRowHeight(value)}
+              className="icon-btn-sm text-violet-600"
+              title="Merge columns"
+              aria-label="Merge columns"
+              onClick={onMergeColumns}
             >
-              {label}
+              <Combine size={16} aria-hidden="true" />
             </button>
-          )
-        })}
-      </div>,
-    )
-  }
+          </>
+        ) : null}
 
-  // Format cluster — always present: background / text colour, alignment, borders.
-  clusters.push(
-    <div key="format" className="flex shrink-0 items-center gap-1">
-      <ColorPickerButton
-        label="Background color"
-        value={format.bg}
-        onChange={setBg}
-        swatches={BG_SWATCHES}
-        icon={<PaintBucket size={16} />}
-      />
-      <ColorPickerButton
-        label="Text color"
-        value={format.fg}
-        onChange={setFg}
-        swatches={FG_SWATCHES}
-        icon={<Baseline size={16} />}
-      />
-      <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-slate-200" />
-      {ALIGNMENTS.map(({ value, label }) => {
-        const active = format.align === value
-        return (
+        {/* ── WHEN a single row is the target: use-as-header, freeze,
+            row-height (dropdown), delete-row. ─────────────────────────── */}
+        {hasRowRun ? <RunDivider /> : null}
+        {onPromoteToHeader ? (
           <button
-            key={value}
             type="button"
-            aria-label={label}
-            aria-pressed={active}
-            className={`icon-btn-sm ${
-              active ? 'bg-accent-500/10 text-accent-600' : ''
-            }`}
-            onClick={() => setAlign(active ? undefined : value)}
+            className="icon-btn-sm text-violet-600"
+            title="Use row as header"
+            aria-label="Use row as header"
+            onClick={onPromoteToHeader}
           >
-            <AlignGlyph dir={value} />
+            <ArrowUpToLine size={16} aria-hidden="true" />
           </button>
-        )
-      })}
-      <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-slate-200" />
-      <BorderControl
-        onApply={(patch) => setBorders(patch.borders)}
-        currentBorders={format.borders}
-      />
-    </div>,
-  )
+        ) : null}
 
-  // Enter formula (writable column target).
-  if (onEnterFormula) {
-    clusters.push(
-      <div key="formula" className="flex shrink-0 items-center">
-        <button
-          type="button"
-          className="btn-ghost-sm whitespace-nowrap"
-          onClick={onEnterFormula}
-        >
-          Enter formula…
-        </button>
-      </div>,
-    )
-  }
+        {onToggleRowPin ? (
+          <button
+            type="button"
+            aria-pressed={isRowPinned}
+            className={`icon-btn-sm ${
+              isRowPinned ? 'bg-accent-500/10 text-accent-600' : 'text-sky-600'
+            }`}
+            title={isRowPinned ? 'Unfreeze row' : 'Freeze row'}
+            aria-label={isRowPinned ? 'Unfreeze row' : 'Freeze row'}
+            onClick={onToggleRowPin}
+          >
+            {isRowPinned ? <PinOff size={16} /> : <Pin size={16} />}
+          </button>
+        ) : null}
 
-  return (
-    <div className="custom-scrollbar flex w-full items-center gap-2 overflow-x-auto px-2 py-1.5 text-sm text-slate-700">
-      {title ? (
-        <span className="eyebrow shrink-0 whitespace-nowrap">{title}</span>
-      ) : null}
-      {clusters.map((node, index) => (
-        <React.Fragment key={index}>
-          {index > 0 || title ? <ClusterDivider /> : null}
-          {node}
-        </React.Fragment>
-      ))}
+        {onSetRowHeight ? (
+          <StripMenu icon={Rows3} ariaLabel="Row height">
+            {(close) => (
+              <>
+                {ROW_HEIGHT_PRESETS.map(({ name, value }) => (
+                  <MenuItem
+                    key={value}
+                    icon={Rows3}
+                    label={name}
+                    active={rowHeight === value}
+                    onClick={() => {
+                      onSetRowHeight(value)
+                      close()
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </StripMenu>
+        ) : null}
+
+        {onDeleteRow ? (
+          <button
+            type="button"
+            className="icon-btn-sm text-rose-600 sm:hover:bg-rose-50 sm:hover:text-rose-600"
+            title="Delete row"
+            aria-label="Delete row"
+            onClick={onDeleteRow}
+          >
+            <Trash2 size={16} />
+          </button>
+        ) : null}
+
+        {/* ── WHEN a writable column: jump to the formula editor ───────── */}
+        {onEnterFormula ? (
+          <>
+            <RunDivider />
+            <button
+              type="button"
+              className="icon-btn-sm text-emerald-600"
+              title="Enter formula"
+              aria-label="Enter formula"
+              onClick={onEnterFormula}
+            >
+              <FunctionSquare size={16} aria-hidden="true" />
+            </button>
+          </>
+        ) : null}
+      </ClusterBox>
     </div>
   )
 }

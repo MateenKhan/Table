@@ -292,7 +292,7 @@ export function BorderControl({ onApply, currentBorders }: BorderControlProps) {
           aria-label="Borders"
           aria-haspopup="dialog"
           aria-expanded={open}
-          className={`icon-btn${open || hasAnyBorder ? ' bg-accent-500/10 text-accent-600' : ''}`}
+          className={`icon-btn border ${open || hasAnyBorder ? 'border-accent-300 bg-accent-500/10 text-accent-600' : 'border-indigo-200 text-indigo-600 sm:hover:bg-indigo-50'}`}
           onClick={() => setOpen((o) => !o)}
         >
           <TriggerBox borders={currentBorders} />

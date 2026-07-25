@@ -1,4 +1,4 @@
-// VENDORED VERBATIM FROM piranha ui/src/pages/tasks/components/ConfirmProvider.tsx — do NOT diverge; at import into piranha, delete src/piranha/ and repoint to the originals.
+// VENDORED VERBATIM FROM the shared UI (pages/tasks/components/ConfirmProvider.tsx — do NOT diverge; at import into the shared UI, delete src/ui/ and repoint to the originals.
 import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import { ConfirmDialog, ConfirmTone } from './ConfirmDialog';

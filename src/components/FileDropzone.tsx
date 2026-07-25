@@ -54,7 +54,7 @@ function toAcceptProp(accept?: string): Accept | undefined {
   return Object.keys(map).length ? map : undefined
 }
 
-// A headless react-dropzone wrapper, piranha-styled: a hairline-friendly drop
+// A headless react-dropzone wrapper, the shared UI-styled: a hairline-friendly drop
 // target that flips to an accent "landing" highlight while a file is over it.
 // The highlight is a pure colour/outline change (no looping motion), so it is
 // reduced-motion safe on its own; the shared transition-colors is zeroed by the
