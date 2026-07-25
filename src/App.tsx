@@ -106,14 +106,34 @@ function applyTypeOverrides<T>(defs: T[]): T[] {
   })
 }
 
-export const App = () => {
-  // Which vertical the URL selected (null = default kitchen-sink sheet).
-  const activeVertical = React.useMemo(() => resolveVertical(), [])
+type AppProps = {
+  // Consumer schema (library embed) — used as the base columns when provided.
+  columns?: typeof baseColumns
+  // Consumer initial rows (library embed).
+  data?: Person[]
+  // true = the standalone demo app (default); false = embedded via the library
+  // entry, which gates OFF all app-only machinery: URL/template routing,
+  // localStorage persistence, and shared-view-on-load.
+  standalone?: boolean
+}
+
+export const App = ({
+  columns: columnsProp,
+  data: dataProp,
+  standalone = true,
+}: AppProps = {}) => {
+  // Which vertical the URL selected (null = default; never in library mode).
+  const activeVertical = React.useMemo(
+    () => (standalone ? resolveVertical() : null),
+    [standalone],
+  )
 
   // A sheet the user previously built (Delete-all → filled in) survives reloads;
   // read it once at mount. When present it takes priority over the demo / profile
   // seed, so the user's own data is what comes back — not the sample rows.
-  const persistedSheetRef = React.useRef(loadCustomSheet())
+  const persistedSheetRef = React.useRef(
+    standalone ? loadCustomSheet() : null,
+  )
   const persistedSheet = persistedSheetRef.current
   const [selectedProfileIds, setSelectedProfileIds] = React.useState<string[]>(
     () => activeVertical?.defaultSelected ?? [],
@@ -128,14 +148,19 @@ export const App = () => {
     [activeVertical, selectedProfileIds],
   )
 
-  const [data, setData] = React.useState<Person[]>(() =>
-    persistedSheet
-      ? (persistedSheet.data as unknown as Person[])
-      : activeVertical && activeVertical.defaultSelected?.length
-        ? (composeProfiles(activeVertical, activeVertical.defaultSelected)
-            .data as unknown as Person[])
-        : makeData(1000),
-  )
+  const [data, setData] = React.useState<Person[]>(() => {
+    // A consumer's `data` prop always wins; a library embed with no data starts
+    // empty. Otherwise the standalone demo restores a saved sheet / profile /
+    // random sample as before.
+    if (dataProp) return dataProp
+    if (!standalone) return []
+    if (persistedSheet) return persistedSheet.data as unknown as Person[]
+    if (activeVertical && activeVertical.defaultSelected?.length) {
+      return composeProfiles(activeVertical, activeVertical.defaultSelected)
+        .data as unknown as Person[]
+    }
+    return makeData(1000)
+  })
   // Formula sources live beside the data, keyed by `${dataRowIndex}:${columnId}`.
   // `data` still holds the computed result, so sorting / filtering / search all
   // keep working against real values.
@@ -168,14 +193,16 @@ export const App = () => {
     releaseAllAttachments()
     // Restore discards the user's saved sheet and returns to the built-in demo
     // schema + data (this is the "bring the data back" action).
-    clearCustomSheet()
+    if (standalone) clearCustomSheet()
     setCustomColumns(null)
-    // Regenerate from the active profiles when a vertical is loaded, otherwise
-    // the default random data set.
+    // Regenerate from the active profiles when a vertical is loaded, else the
+    // demo's random data — or, in a library embed, the caller's initial rows.
     setData(
       composed
         ? (composed.data as unknown as Person[])
-        : makeData(1000),
+        : standalone
+          ? makeData(1000)
+          : (dataProp ?? []),
     )
   }
 
@@ -256,7 +283,7 @@ export const App = () => {
   // plain reload re-seeds the sample data while a sheet the user actually built
   // (rows + headers + formulas) survives the reload.
   React.useEffect(() => {
-    if (!isCustomSchema || !customColumns) return
+    if (!standalone || !isCustomSchema || !customColumns) return
     const id = window.setTimeout(() => {
       saveCustomSheet({
         customColumns: customColumns as unknown as unknown[],
@@ -265,7 +292,7 @@ export const App = () => {
       })
     }, 400)
     return () => window.clearTimeout(id)
-  }, [isCustomSchema, customColumns, data, formulas])
+  }, [standalone, isCustomSchema, customColumns, data, formulas])
 
   // ── Actions-bar data operations ────────────────────────────────────────────
   // "Delete all" is a full wipe → a blank sheet. Unlike deleting rows, this also
@@ -483,7 +510,7 @@ export const App = () => {
   // does not read/write the default sheet's persisted merges (keeping the two
   // from contaminating each other).
   const [merges, setMerges] = React.useState<ColumnMerge[]>(() =>
-    activeVertical ? [] : loadStoredMerges(),
+    activeVertical || !standalone ? [] : loadStoredMerges(),
   )
   // `baseColumns` is the default schema; a user's blank sheet, if any, wins over
   // everything; otherwise a composed profile sheet replaces the default.
@@ -491,7 +518,7 @@ export const App = () => {
     ? customColumns
     : composed
       ? (composed.columns as unknown as typeof baseColumns)
-      : baseColumns
+      : (columnsProp ?? baseColumns)
   const columns = React.useMemo(
     () =>
       applyTypeOverrides(buildMergedColumns(effectiveBaseColumns, merges)),
@@ -502,8 +529,8 @@ export const App = () => {
   // Merges are plain descriptors, so they survive a reload like custom
   // functions do — but only for the default sheet (see above).
   React.useEffect(() => {
-    if (!activeVertical) storeMerges(merges)
-  }, [merges, activeVertical])
+    if (!activeVertical && standalone) storeMerges(merges)
+  }, [merges, activeVertical, standalone])
 
   const readOnlyColumns = React.useMemo(
     () => [
@@ -653,7 +680,9 @@ export const App = () => {
   )
 
   // Open a shared view file → the URL carries the snapshot; restore it on load.
+  // Standalone demo only — a library embed must not read the host page's URL.
   React.useEffect(() => {
+    if (!standalone) return
     const shared = readSharedSnapshotFromUrl()
     if (shared) importSnapshot(shared)
     // eslint-disable-next-line react-hooks/exhaustive-deps

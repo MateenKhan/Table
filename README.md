@@ -19,6 +19,36 @@ it. Attribution is preserved in [`LICENSE`](./LICENSE).
 
 ---
 
+## Install & use
+
+```bash
+npm i @jugaaadi/table
+```
+
+```tsx
+import { SpreadsheetTable } from '@jugaaadi/table'
+import '@jugaaadi/table/style.css' // import the stylesheet once
+
+const columns = [
+  { accessorKey: 'name', header: 'Name' },
+  { accessorKey: 'age', header: 'Age' },
+]
+const data = [
+  { name: 'Ada', age: 36 },
+  { name: 'Alan', age: 41 },
+]
+
+export default function App() {
+  return <SpreadsheetTable columns={columns} data={data} />
+}
+```
+
+- `columns` are TanStack Table [`ColumnDef`](https://tanstack.com/table/latest/docs/api/core/column-def)s (re-exported as `ColumnDef`); omit `columns`/`data` for a blank sheet the user builds themselves.
+- **`react` / `react-dom` 18+** are peer dependencies (bring your own).
+- Import **`@jugaaadi/table/style.css` once** — the component ships its compiled styles, so you don't need Tailwind configured in your app.
+
+---
+
 ## Features
 
 ### Cells & editing
