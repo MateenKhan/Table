@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { useCellSelection } from '../useCellSelection'
 import { useThumbnailMetrics } from '../thumbnailSize'
 import useColumnDrag from '../useColumnDrag'
+import useRowDrag, { buildRowPermutation } from '../useRowDrag'
 import { alignmentFor } from '../columnTypes'
 import {
   columnIndexForId,
@@ -229,6 +230,10 @@ type Props<T extends RowData> = {
   // Merge a multi-column selection into one column. Wired into the format-only
   // strip only when two or more columns are selected.
   onMergeColumns?: (columnIds: string[]) => void
+  // Reorder the underlying data by dragging a row's number-gutter cell: move the
+  // row at `fromDataIndex` to sit before `toDataIndex` (== row count → append).
+  // Absent → the gutter stays a plain click-to-select with no drag.
+  onReorderRows?: (fromDataIndex: number, toDataIndex: number) => void
 }
 
 export function CustomTable<T extends RowData>({
@@ -244,6 +249,7 @@ export function CustomTable<T extends RowData>({
   fontSizes,
   fontFamilies,
   onMergeColumns,
+  onReorderRows,
 }: Props<T>) {
   const selection = useCellSelection()
   // Re-render whenever any scope's colour / alignment changes.
@@ -416,6 +422,49 @@ export function CustomTable<T extends RowData>({
   const ROW_MAX_HEIGHT = 480
 
   const [rowHeights, setRowHeights] = React.useState<Record<number, number>>({})
+
+  // ── Row drag-to-reorder ─────────────────────────────────────────────────────
+  // Reordering the underlying array only lines up with what the user sees when
+  // the visible order IS the data order — so it is switched off the moment any
+  // sort / group / filter / global-search is active or the rows span more than
+  // one page. When off, the gutter is a plain click-to-select with no drag.
+  const dragState = table.getState()
+  const rowDragEnabled =
+    !!onReorderRows &&
+    dragState.sorting.length === 0 &&
+    dragState.grouping.length === 0 &&
+    dragState.columnFilters.length === 0 &&
+    !dragState.globalFilter &&
+    table.getPageCount() <= 1
+
+  // A committed reorder permutes the data indices, so the per-DATA-index row
+  // heights are remapped through the SAME splice (via the shared helper) before
+  // the data itself moves — otherwise a height would be left on the wrong row.
+  const handleReorderRows = (from: number, to: number) => {
+    const n = table.getCoreRowModel().rows.length
+    const oldToNew = buildRowPermutation(n, from, to)
+    setRowHeights((prev) => {
+      const entries = Object.entries(prev)
+      if (!entries.length) return prev
+      const next: Record<number, number> = {}
+      for (const [key, value] of entries) {
+        const oldIndex = Number(key)
+        next[oldToNew[oldIndex] ?? oldIndex] = value
+      }
+      return next
+    })
+    onReorderRows?.(from, to)
+  }
+
+  const rowDrag = useRowDrag({
+    enabled: rowDragEnabled,
+    onReorder: handleReorderRows,
+  })
+
+  // Records the gutter pointer-down position so the click that follows can tell a
+  // plain click (select the whole row) from the tail of a drag-reorder — the
+  // same click-vs-drag guard the header uses.
+  const rowGutterClickStart = React.useRef<{ x: number; y: number } | null>(null)
 
   // Leaf header per column id, so a letter-row grip drives the very same resize
   // interaction as the header grip above it.
@@ -686,9 +735,18 @@ export function CustomTable<T extends RowData>({
     return (
       <tr
         key={row.id}
-        // Lets the row-height measurer find this row by DATA index.
+        // Lets the row-height measurer + the row-drag layer find this row by
+        // DATA index.
         data-data-index={dataRowIndex}
-        style={{ height: rowHeight }}
+        style={{
+          height: rowHeight,
+          // Subtly fade the row being dragged so the drop line reads as "where
+          // it will go" rather than "where it is".
+          opacity:
+            dataRowIndex >= 0 && dataRowIndex === rowDrag.draggingIndex
+              ? 0.6
+              : undefined,
+        }}
       >
         {/* Row-number gutter cell, sticky to the left like a pinned column. Shows
             the 1-based screen position; a click selects the whole row, which the
@@ -713,12 +771,43 @@ export function CustomTable<T extends RowData>({
             width: ROW_NUMBER_WIDTH,
             minWidth: ROW_NUMBER_WIDTH,
             zIndex: isFrozen ? 4 : 3,
+            // Grab-to-reorder affordance; touch-none keeps a touch-drag from
+            // scrolling the table instead of moving the row.
+            ...(rowDragEnabled && dataRowIndex >= 0
+              ? { cursor: 'grab', touchAction: 'none' }
+              : {}),
             ...(frozen?.separatorBottom ? { borderBottom: separator } : {}),
             ...(frozen?.separatorTop ? { borderTop: separator } : {}),
           }}
+          // Pick the row up by its number. Drag only actually begins past a small
+          // threshold (see useRowDrag), so a plain click still falls through to
+          // the select handler below.
+          onPointerDown={
+            rowDragEnabled && dataRowIndex >= 0
+              ? (event) => {
+                  rowGutterClickStart.current = {
+                    x: event.clientX,
+                    y: event.clientY,
+                  }
+                  rowDrag.onRowPointerDown(dataRowIndex, event)
+                }
+              : undefined
+          }
           onClick={
             dataRowIndex >= 0
-              ? () => selection?.onRowHeaderClick(rowIndex)
+              ? (event) => {
+                  // Swallow the click that ends a real drag so it does not also
+                  // select; a click that never moved still selects the row.
+                  const start = rowGutterClickStart.current
+                  rowGutterClickStart.current = null
+                  if (start) {
+                    const moved =
+                      Math.abs(event.clientX - start.x) > 4 ||
+                      Math.abs(event.clientY - start.y) > 4
+                    if (moved) return
+                  }
+                  selection?.onRowHeaderClick(rowIndex)
+                }
               : undefined
           }
         >
@@ -738,6 +827,7 @@ export function CustomTable<T extends RowData>({
           </span>
           {dataRowIndex >= 0 ? (
             <div
+              data-resize-handle="true"
               className={rowGripClass}
               title="Drag to resize · double-click to fit"
               onPointerDown={(event) => startRowResize(dataRowIndex, event)}
@@ -1010,6 +1100,9 @@ export function CustomTable<T extends RowData>({
       <div
         ref={scrollContainerRef}
         className="custom-scrollbar bg-white"
+        // The row-drag layer finds this scroller (to position the drop line in
+        // its content coordinates) via this attribute.
+        data-row-drag-scroll=""
         // tabIndex makes it focusable; the container owns both scroll axes so the
         // page never scrolls sideways (§8), with momentum + no scroll-chaining on
         // touch. The focus outline is suppressed here — the accent cell overlay is
@@ -1017,6 +1110,10 @@ export function CustomTable<T extends RowData>({
         // noise, not signal.
         tabIndex={0}
         style={{
+          // `relative` makes this the containing block for the absolutely
+          // positioned row-drop line below (sticky children are unaffected —
+          // this element is still their scroll context).
+          position: 'relative',
           flex: '1 1 auto',
           minHeight: 0,
           overflow: 'auto',
@@ -1399,6 +1496,26 @@ export function CustomTable<T extends RowData>({
         {/* No <tfoot>: the old footer just echoed column ids and read as a
             duplicate header row, confusing when the data was empty. */}
       </table>
+      {/* Row-drop indicator: a crisp 2px accent line spanning the table at the
+          boundary the dragged row would land on. Absolutely positioned in the
+          scroller's content coordinates so it rides with vertical scroll; it
+          only tweens when reduced motion is off. */}
+      {rowDrag.indicator ? (
+        <div
+          aria-hidden="true"
+          className="bg-accent-500"
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: rowDrag.indicator.top,
+            width: rowDrag.indicator.width,
+            height: 2,
+            zIndex: 8,
+            pointerEvents: 'none',
+            ...(rowDrag.reduceMotion ? {} : { transition: 'top 60ms linear' }),
+          }}
+        />
+      ) : null}
       </div>
     </div>
   )

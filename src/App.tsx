@@ -40,6 +40,7 @@ import {
   isGlobalSearchEmpty,
 } from './globalSearch'
 import { customFunctions, FormulaMap, recalcFormulas } from './formula'
+import { buildRowPermutation } from './useRowDrag'
 import {
   columnTypeOverrides,
   resolveColumnMeta,
@@ -412,6 +413,47 @@ export const App = ({
       setData((prev) => prev.filter((_, i) => !drop.has(i)))
     },
     [history],
+  )
+
+  // Drag-to-reorder a row: move the row at `from` to sit before original index
+  // `to` (== data.length → append at the end). Only ever called when the visible
+  // order equals the data order (CustomTable gates the drag on that), so a splice
+  // on the raw array is exactly what the user sees.
+  const reorderRows = React.useCallback(
+    (from: number, to: number) => {
+      const n = data.length
+      if (from < 0 || from >= n || to < 0 || to > n) return
+      const oldToNew = buildRowPermutation(n, from, to)
+
+      setData((prev) => {
+        const next = [...prev]
+        const [moved] = next.splice(from, 1)
+        const insertAt = to > from ? to - 1 : to
+        next.splice(insertAt, 0, moved)
+        return next
+      })
+
+      // Formulas are keyed `${dataRowIndex}:${columnId}`, so each key's row index
+      // is rewritten through the same permutation — the formula follows its row.
+      setFormulas((prev) => {
+        const keys = Object.keys(prev)
+        if (!keys.length) return prev
+        const next: FormulaMap = {}
+        for (const key of keys) {
+          const sep = key.indexOf(':')
+          const rowIndex = Number(key.slice(0, sep))
+          const columnId = key.slice(sep + 1)
+          const mapped = oldToNew[rowIndex] ?? rowIndex
+          next[`${mapped}:${columnId}`] = prev[key]
+        }
+        return next
+      })
+
+      // The undo stacks are keyed to the old row indices, so they can no longer
+      // be replayed onto the right rows once the order changes.
+      history.clear()
+    },
+    [data.length, history],
   )
 
   // Promote a selected row to the header row: copy its cell values into the
@@ -919,6 +961,7 @@ export const App = ({
                   fontSizes={[...FONT_SIZE_OPTIONS]}
                   fontFamilies={[...FONT_FAMILY_OPTIONS]}
                   onMergeColumns={mergeColumns}
+                  onReorderRows={reorderRows}
                 />
               </div>
               {/* Excel-style aggregates of the current selection. */}
