@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { MotionConfig } from 'framer-motion'
 import App from './App'
+import { makeData } from './makeData'
 import { ToastProvider, ConfirmProvider } from './ui'
 
 import './index.css'
@@ -19,7 +20,9 @@ ReactDOM.createRoot(rootElement).render(
     <MotionConfig reducedMotion="user">
       <ToastProvider>
         <ConfirmProvider>
-          <App />
+          {/* Inject the faker-backed sample-data generator here (demo build only)
+              so `@faker-js/faker` never enters the published library bundle. */}
+          <App makeDemoData={() => makeData(1000)} />
         </ConfirmProvider>
       </ToastProvider>
     </MotionConfig>

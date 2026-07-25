@@ -15,7 +15,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import React from 'react'
-import { makeData, Person } from './makeData'
+import type { Person } from './makeData'
 
 import { useSkipper } from './hooks'
 import {
@@ -115,13 +115,20 @@ type AppProps = {
   // entry, which gates OFF all app-only machinery: URL/template routing,
   // localStorage persistence, and shared-view-on-load.
   standalone?: boolean
+  // Injected by the DEMO entry (main.tsx) to seed/regenerate the random sample
+  // rows. Kept out of App's static import graph on purpose: `makeData` pulls in
+  // `@faker-js/faker` (~3 MB), which must NEVER ship inside the published
+  // library bundle — only the demo build includes it. Absent → no sample data.
+  makeDemoData?: () => Person[]
 }
 
 export const App = ({
   columns: columnsProp,
   data: dataProp,
   standalone = true,
+  makeDemoData,
 }: AppProps = {}) => {
+  const generateDemoRows = makeDemoData ?? ((): Person[] => [])
   // Which vertical the URL selected (null = default; never in library mode).
   const activeVertical = React.useMemo(
     () => (standalone ? resolveVertical() : null),
@@ -159,7 +166,7 @@ export const App = ({
       return composeProfiles(activeVertical, activeVertical.defaultSelected)
         .data as unknown as Person[]
     }
-    return makeData(1000)
+    return generateDemoRows()
   })
   // Formula sources live beside the data, keyed by `${dataRowIndex}:${columnId}`.
   // `data` still holds the computed result, so sorting / filtering / search all
@@ -201,7 +208,7 @@ export const App = ({
       composed
         ? (composed.data as unknown as Person[])
         : standalone
-          ? makeData(1000)
+          ? generateDemoRows()
           : (dataProp ?? []),
     )
   }
@@ -232,7 +239,7 @@ export const App = ({
         ? (composed.data as unknown as Person[])
         : activeVertical
           ? []
-          : makeData(1000),
+          : generateDemoRows(),
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composed])
