@@ -662,6 +662,14 @@ export function CustomTable<T extends RowData>({
     // only column scope does.
     const dataRowIndex = row.getIsGrouped() ? -1 : row.index
 
+    // Highlight the row-number gutter when this row is selected (Excel-style —
+    // the 1/2/3 lights up, not just the cells). `scope` is the outer render's
+    // selection scope, resolved at call time.
+    const rowSelected =
+      dataRowIndex >= 0 &&
+      (scope?.kind === 'rows' || scope?.kind === 'all') &&
+      !!scope?.rowIndices.includes(dataRowIndex)
+
     // A manually-set height (from a gutter drag / auto-fit) overrides the
     // thumbnail-size default; grouped rows keep the default.
     const rowHeight =
@@ -688,12 +696,14 @@ export function CustomTable<T extends RowData>({
             resize grip (drag = set height, double-click = auto-fit). A frozen row
             also sticks vertically and sits above the scrolling gutter cells. */}
         <td
-          className={`${gutterCell} select-none ${
-            isFrozen ? 'bg-slate-200' : ''
-          } ${
-            dataRowIndex >= 0
-              ? 'cursor-pointer transition-colors sm:hover:bg-slate-200'
-              : ''
+          className={`${gutterCell} select-none transition-colors ${
+            rowSelected
+              ? 'bg-accent-500/20 font-semibold text-accent-700'
+              : isFrozen
+                ? 'bg-slate-200'
+                : dataRowIndex >= 0
+                  ? 'cursor-pointer sm:hover:bg-slate-200'
+                  : ''
           }`}
           style={{
             position: 'sticky',
@@ -1050,6 +1060,12 @@ export function CustomTable<T extends RowData>({
             />
             {leafColumns.map((col, index) => {
               const isData = !NON_DATA_COLUMN_IDS.includes(col.id)
+              // Highlight the coordinate letter when its column is selected
+              // (Excel-style — the header/letter lights up, not just the cells).
+              const colSelected =
+                isData &&
+                (scope?.kind === 'columns' || scope?.kind === 'all') &&
+                !!scope?.columnIds.includes(col.id)
               return (
                 <th
                   key={`letter-${col.id}`}
@@ -1057,10 +1073,12 @@ export function CustomTable<T extends RowData>({
                   // the letters stay locked to their columns through drag,
                   // resize, pin and hide.
                   data-col-id={col.id}
-                  className={`${gutterCell} px-1 ${
-                    isData
-                      ? 'cursor-pointer transition-colors sm:hover:bg-slate-200'
-                      : ''
+                  className={`${gutterCell} px-1 transition-colors ${
+                    colSelected
+                      ? 'bg-accent-500/20 font-semibold text-accent-700'
+                      : isData
+                        ? 'cursor-pointer sm:hover:bg-slate-200'
+                        : ''
                   }`}
                   style={letterCellStyle(col)}
                   onClick={
@@ -1144,6 +1162,14 @@ export function CustomTable<T extends RowData>({
                   typeof headerLabel === 'string'
                 const isRenaming = renamingColumnId === header.column.id
 
+                // Highlight the header when its column (or, for a group header,
+                // any column beneath it) is selected.
+                const headerSelected =
+                  (scope?.kind === 'columns' || scope?.kind === 'all') &&
+                  header.column
+                    .getLeafColumns()
+                    .some((c) => scope?.columnIds.includes(c.id))
+
                 return (
                   <th
                     key={header.id}
@@ -1151,7 +1177,11 @@ export function CustomTable<T extends RowData>({
                     // measures widths off the header cells.
                     data-col-id={header.column.id}
                     data-header-id={header.id}
-                    className="bg-white border border-slate-200 px-2 py-1.5 text-left align-middle font-semibold text-slate-700"
+                    className={`border border-slate-200 px-2 py-1.5 text-left align-middle font-semibold transition-colors ${
+                      headerSelected
+                        ? 'bg-accent-500/15 text-accent-700'
+                        : 'bg-white text-slate-700'
+                    }`}
                     style={{
                       ...shiftedHeaderStyle(
                         header,

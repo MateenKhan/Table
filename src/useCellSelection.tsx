@@ -367,7 +367,19 @@ export function CellSelectionProvider<T extends RowData>({
       if (dataIndex < 0) continue
       for (let c = target.left; c <= target.right; c++) {
         const columnId = columnIdAt(c)
-        if (!columnId || readOnly.has(columnId)) continue
+        if (!columnId) continue
+        // Read-only columns are skipped from clearing EXCEPT image/file
+        // (attachment) columns: "read-only" there only means "you can't type
+        // into it", not "you can't empty it". Clearing removes the image/file
+        // (the AttachmentCell releases its blob when the value changes). Derived
+        // columns (fullName, combined) stay skipped since they recompute.
+        const metaType = (
+          table.getColumn(columnId)?.columnDef.meta as
+            | { type?: string }
+            | undefined
+        )?.type
+        const isAttachmentCol = metaType === 'image' || metaType === 'file'
+        if (readOnly.has(columnId) && !isAttachmentCol) continue
         cells.push(cellPatch(dataIndex, columnId, ''))
         formulaPatches.push(formulaPatch(dataIndex, columnId, undefined))
       }
