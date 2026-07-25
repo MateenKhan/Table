@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // PROFILES / TEMPLATES — jugaaadi-only, EXCLUDED from the piranha import.
-// See src/piranhaExcluded.ts and copy_table.md.
+// See src/piranhaExcluded.ts.
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // A *profile* is just a named set of columns (+ starter rows): Cupboard, Table,

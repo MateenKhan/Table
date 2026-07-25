@@ -78,7 +78,7 @@ import {
 
 // ── Profiles / templates (jugaaadi-only, EXCLUDED from the piranha import) ──────
 // Behind a lazy boundary so a build that drops src/templates/* still works, and
-// so the default sheet never pays for this code. See copy_table.md.
+// so the default sheet never pays for this code.
 import { resolveVertical } from './templates/resolveTemplate'
 import { composeProfiles } from './templates/registry'
 const TemplateSelector = React.lazy(
