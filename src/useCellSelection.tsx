@@ -66,9 +66,18 @@ export type CellSelectionApi = {
   onCellMouseEnter: (pos: CellPos) => void
   onCellDoubleClick: (pos: CellPos) => void
   // Excel-style whole-column selection off a header click (by column id).
-  onColumnHeaderClick: (columnId: string) => void
+  // `extend` (Shift) grows a contiguous column range from the anchor column;
+  // `additive` (Ctrl) adds it as a separate region for non-contiguous select.
+  onColumnHeaderClick: (
+    columnId: string,
+    mods?: { additive?: boolean; extend?: boolean },
+  ) => void
   // Excel-style whole-row selection off a row-number click (by screen row).
-  onRowHeaderClick: (screenRow: number) => void
+  // Same `extend` / `additive` modifiers as `onColumnHeaderClick`.
+  onRowHeaderClick: (
+    screenRow: number,
+    mods?: { additive?: boolean; extend?: boolean },
+  ) => void
   // The corner "select all" gesture: the whole grid.
   onSelectAll: () => void
   // Open the formula editor on the first writable data cell of a column. Used by
@@ -151,6 +160,12 @@ export function CellSelectionProvider<T extends RowData>({
   // The cell the fill handle is currently dragged over - both axes, so the
   // handle fills sideways and diagonally as well as down.
   const [fillTarget, setFillTarget] = React.useState<CellPos | null>(null)
+  // Banked (Ctrl-added) selection rectangles for non-contiguous multi-select.
+  // The LIVE region is always the anchor/focus rect; a Ctrl gesture "banks" the
+  // current live rect here and opens a fresh one, so the full selection is
+  // `[...regions, rect]`. Excel-style: Shift extends the live region into a
+  // contiguous range, Ctrl adds a separate one (cells, rows or columns).
+  const [regions, setRegions] = React.useState<CellRect[]>([])
 
   // Whether the shortcuts help popup is open (opened with `?`).
   const [helpOpen, setHelpOpen] = React.useState(false)
@@ -180,6 +195,11 @@ export function CellSelectionProvider<T extends RowData>({
           right: Math.max(anchor.col, focus.col),
         }
       : null
+
+  // Every rectangle the selection covers: the banked Ctrl-regions plus the live
+  // anchor/focus rect. The single source of truth for rendering, scope, copy,
+  // clear and formatting once multi-select is in play.
+  const allRegions = (): CellRect[] => (rect ? [...regions, rect] : [...regions])
 
   /* ------------------------------------------------------- grid accessors */
 
@@ -358,35 +378,47 @@ export function CellSelectionProvider<T extends RowData>({
     )
   }
 
-  const clearCells = (target: CellRect) => {
+  // Clear the CONTENTS of every cell across one or more rectangles in a single
+  // undoable step. Cells shared by overlapping regions are patched once.
+  const clearRegions = (targets: CellRect[]) => {
     const cells: CellPatch[] = []
     const formulaPatches: FormulaPatch[] = []
+    const seen = new Set<string>()
 
-    for (let r = target.top; r <= target.bottom; r++) {
-      const dataIndex = dataIndexAt(r)
-      if (dataIndex < 0) continue
-      for (let c = target.left; c <= target.right; c++) {
-        const columnId = columnIdAt(c)
-        if (!columnId) continue
-        // Read-only columns are skipped from clearing EXCEPT image/file
-        // (attachment) columns: "read-only" there only means "you can't type
-        // into it", not "you can't empty it". Clearing removes the image/file
-        // (the AttachmentCell releases its blob when the value changes). Derived
-        // columns (fullName, combined) stay skipped since they recompute.
-        const metaType = (
-          table.getColumn(columnId)?.columnDef.meta as
-            | { type?: string }
-            | undefined
-        )?.type
-        const isAttachmentCol = metaType === 'image' || metaType === 'file'
-        if (readOnly.has(columnId) && !isAttachmentCol) continue
-        cells.push(cellPatch(dataIndex, columnId, ''))
-        formulaPatches.push(formulaPatch(dataIndex, columnId, undefined))
+    for (const target of targets) {
+      for (let r = target.top; r <= target.bottom; r++) {
+        const dataIndex = dataIndexAt(r)
+        if (dataIndex < 0) continue
+        for (let c = target.left; c <= target.right; c++) {
+          const columnId = columnIdAt(c)
+          if (!columnId) continue
+          const dedup = `${dataIndex}::${columnId}`
+          if (seen.has(dedup)) continue
+          // Read-only columns are skipped from clearing EXCEPT image/file
+          // (attachment) columns: "read-only" there only means "you can't type
+          // into it", not "you can't empty it". Clearing removes the image/file
+          // (the AttachmentCell releases its blob when the value changes).
+          // Derived columns (fullName, combined) stay skipped since they
+          // recompute.
+          const metaType = (
+            table.getColumn(columnId)?.columnDef.meta as
+              | { type?: string }
+              | undefined
+          )?.type
+          const isAttachmentCol = metaType === 'image' || metaType === 'file'
+          if (readOnly.has(columnId) && !isAttachmentCol) continue
+          seen.add(dedup)
+          cells.push(cellPatch(dataIndex, columnId, ''))
+          formulaPatches.push(formulaPatch(dataIndex, columnId, undefined))
+        }
       }
     }
 
     commitPatch('clear', cells, formulaPatches)
   }
+
+  // Cut / fill operate on a single rectangle; delegate to the multi-region path.
+  const clearCells = (target: CellRect) => clearRegions([target])
 
   /* ----------------------------------------------------------------- fill */
 
@@ -524,6 +556,8 @@ export function CellSelectionProvider<T extends RowData>({
 
   const rectRef = React.useRef(rect)
   rectRef.current = rect
+  const regionsRef = React.useRef(regions)
+  regionsRef.current = regions
   const anchorRef = React.useRef(anchor)
   anchorRef.current = anchor
   const fillTargetRef = React.useRef(fillTarget)
@@ -773,9 +807,17 @@ export function CellSelectionProvider<T extends RowData>({
     // this is what makes keyboard nav take over and blurs the query input.
     focusGrid()
 
+    // Ctrl / Cmd (without Shift) banks the current region and opens a fresh
+    // one — non-contiguous multi-select. Shift extends the live region.
+    const additive = (event.ctrlKey || event.metaKey) && !event.shiftKey
     if (event.shiftKey && anchor) {
       setFocus(pos)
+    } else if (additive && rect) {
+      setRegions((prev) => [...prev, rect])
+      setAnchor(pos)
+      setFocus(pos)
     } else {
+      setRegions([])
       setAnchor(pos)
       setFocus(pos)
     }
@@ -802,6 +844,7 @@ export function CellSelectionProvider<T extends RowData>({
     if (!isSelectable(pos)) return
     const columnId = columnIdAt(pos.col)
     if (!columnId || readOnly.has(columnId)) return
+    setRegions([])
     setAnchor(pos)
     setFocus(pos)
     beginEdit(pos)
@@ -811,7 +854,10 @@ export function CellSelectionProvider<T extends RowData>({
   // the selection from the first to the last row for that one column, reusing
   // the same anchor/focus range everything else already renders and copies
   // from. Skip columns (the row-select checkbox) opt out entirely.
-  const onColumnHeaderClick = (columnId: string) => {
+  const onColumnHeaderClick = (
+    columnId: string,
+    mods: { additive?: boolean; extend?: boolean } = {},
+  ) => {
     if (skip.has(columnId)) return
     const col = columnIds().indexOf(columnId)
     if (col < 0) return
@@ -820,6 +866,15 @@ export function CellSelectionProvider<T extends RowData>({
     setEditing(null)
     dragMode.current = 'none'
     focusGrid()
+    // Shift: contiguous column range from the anchor column to this one.
+    if (mods.extend && anchor) {
+      setAnchor({ row: 0, col: anchor.col })
+      setFocus({ row: lastRow, col })
+      return
+    }
+    // Ctrl: bank the live region and add this column as a separate one.
+    if (mods.additive && rect) setRegions((prev) => [...prev, rect])
+    else setRegions([])
     setAnchor({ row: 0, col })
     setFocus({ row: lastRow, col })
   }
@@ -827,13 +882,25 @@ export function CellSelectionProvider<T extends RowData>({
   // Excel-style whole-row selection: clicking a row-number gutter cell spans the
   // selection across every column of that one row. Grouped (aggregate) rows have
   // no backing data and opt out.
-  const onRowHeaderClick = (screenRow: number) => {
+  const onRowHeaderClick = (
+    screenRow: number,
+    mods: { additive?: boolean; extend?: boolean } = {},
+  ) => {
     if (dataIndexAt(screenRow) < 0) return
     const lastCol = columnIds().length - 1
     if (lastCol < 0) return
     setEditing(null)
     dragMode.current = 'none'
     focusGrid()
+    // Shift: contiguous row range from the anchor row to this one.
+    if (mods.extend && anchor) {
+      setAnchor({ row: anchor.row, col: 0 })
+      setFocus({ row: screenRow, col: lastCol })
+      return
+    }
+    // Ctrl: bank the live region and add this row as a separate one.
+    if (mods.additive && rect) setRegions((prev) => [...prev, rect])
+    else setRegions([])
     setAnchor({ row: screenRow, col: 0 })
     setFocus({ row: screenRow, col: lastCol })
   }
@@ -847,6 +914,7 @@ export function CellSelectionProvider<T extends RowData>({
     setEditing(null)
     dragMode.current = 'none'
     focusGrid()
+    setRegions([])
     setAnchor({ row: 0, col: 0 })
     setFocus({ row: lastRow, col: lastCol })
   }
@@ -954,6 +1022,8 @@ export function CellSelectionProvider<T extends RowData>({
   // when `extend`, otherwise collapses onto the new cell.
   const moveTo = (target: CellPos, extend: boolean) => {
     if (!isSelectable(target)) return
+    // Keyboard navigation collapses any non-contiguous multi-selection.
+    setRegions([])
     setFocus(target)
     if (!extend) setAnchor(target)
   }
@@ -961,6 +1031,8 @@ export function CellSelectionProvider<T extends RowData>({
   const move = (rowDelta: number, colDelta: number, extend: boolean) => {
     const from = extend ? focus : anchor
     if (!from) return
+    // Keyboard navigation collapses any non-contiguous multi-selection.
+    setRegions([])
 
     let next: CellPos = { row: from.row, col: from.col }
     if (colDelta) next = nextSelectableColumn(next, colDelta) ?? next
@@ -1071,8 +1143,30 @@ export function CellSelectionProvider<T extends RowData>({
         case 'PageDown':
           event.preventDefault()
           return move(PAGE_ROWS, 0, extend)
+        case ' ':
+          // Space acts like a click: Ctrl+Space selects the active column(s),
+          // Shift+Space the active row(s) — the keyboard twin of Ctrl/Shift +
+          // clicking a header. Plain space falls through to start an edit.
+          if ((accel || event.shiftKey) && rectRef.current) {
+            event.preventDefault()
+            const r = rectRef.current
+            if (accel) {
+              const lastRow = rows().length - 1
+              if (lastRow < 0) return
+              setAnchor({ row: 0, col: r.left })
+              setFocus({ row: lastRow, col: r.right })
+            } else {
+              const lastCol = columnIds().length - 1
+              if (lastCol < 0) return
+              setAnchor({ row: r.top, col: 0 })
+              setFocus({ row: r.bottom, col: lastCol })
+            }
+            return
+          }
+          break
         case 'Escape':
           event.preventDefault()
+          setRegions([])
           setAnchor(null)
           setFocus(null)
           return
@@ -1099,7 +1193,12 @@ export function CellSelectionProvider<T extends RowData>({
         case 'Delete':
         case 'Backspace':
           event.preventDefault()
-          if (rectRef.current) clearCells(rectRef.current)
+          if (rectRef.current)
+            clearRegions(
+              regionsRef.current.length
+                ? [...regionsRef.current, rectRef.current]
+                : [rectRef.current],
+            )
           return
         default:
           break
@@ -1150,6 +1249,7 @@ export function CellSelectionProvider<T extends RowData>({
     setFocus(null)
     setEditing(null)
     setFillTarget(null)
+    setRegions([])
   }, [viewSignature])
 
   /* ------------------------------------------------------------ rendering */
@@ -1173,11 +1273,20 @@ export function CellSelectionProvider<T extends RowData>({
   const renderDecoration = (pos: CellPos): React.ReactNode => {
     if (!rect) return null
 
-    const selected = inRect(pos, rect)
+    const regs = regions.length ? [...regions, rect] : [rect]
+    // A cell belongs to the selection if ANY region covers it. Membership drives
+    // both the fill and, per-side, whether an accent edge is drawn (an edge is
+    // painted only where the neighbouring cell is OUTSIDE the selection), so
+    // each region — contiguous or not — gets a clean outline.
+    const inSelection = (r: number, c: number) =>
+      regs.some((rg) => inRect({ row: r, col: c }, rg))
+
+    const selected = inSelection(pos.row, pos.col)
     const previewed = !!fillPreview && !selected && inRect(pos, fillPreview)
     if (!selected && !previewed) return null
 
     const isActive = !!anchor && anchor.row === pos.row && anchor.col === pos.col
+    // The fill handle rides the bottom-right of the LIVE region only.
     const isHandleCell = pos.row === rect.bottom && pos.col === rect.right
 
     const edge = (on: boolean) => (on ? `2px solid ${ACTIVE_COLOR}` : '0')
@@ -1220,10 +1329,10 @@ export function CellSelectionProvider<T extends RowData>({
             zIndex: 2,
             pointerEvents: 'none',
             background: RANGE_FILL,
-            borderTop: edge(pos.row === rect.top),
-            borderBottom: edge(pos.row === rect.bottom),
-            borderLeft: edge(pos.col === rect.left),
-            borderRight: edge(pos.col === rect.right),
+            borderTop: edge(!inSelection(pos.row - 1, pos.col)),
+            borderBottom: edge(!inSelection(pos.row + 1, pos.col)),
+            borderLeft: edge(!inSelection(pos.row, pos.col - 1)),
+            borderRight: edge(!inSelection(pos.row, pos.col + 1)),
           }
 
     return (
@@ -1258,45 +1367,88 @@ export function CellSelectionProvider<T extends RowData>({
   // exact formatting scope keys it maps to. A future actions bar reads these to
   // call `tableFormatting.update(scope, …)` without touching screen geometry.
   const selectionScope: SelectionScope = (() => {
-    if (!rect) return { kind: 'none', rowIndices: [], columnIds: [] }
+    const regs = allRegions()
+    if (!regs.length) return { kind: 'none', rowIndices: [], columnIds: [] }
 
-    // Data indices for the selected screen rows (grouped rows drop out).
+    // Union of selected data-row indices and column ids across every region
+    // (grouped rows and skip columns drop out), de-duplicated but order-stable.
+    const rowSeen = new Set<number>()
+    const colSeen = new Set<string>()
     const rowIndices: number[] = []
-    for (let r = rect.top; r <= rect.bottom; r++) {
-      const dataIndex = dataIndexAt(r)
-      if (dataIndex >= 0) rowIndices.push(dataIndex)
-    }
-    // Column ids for the selected columns, minus skip columns (the checkbox).
     const columnIds: string[] = []
-    for (let c = rect.left; c <= rect.right; c++) {
-      const columnId = columnIdAt(c)
-      if (columnId && !skip.has(columnId)) columnIds.push(columnId)
+    for (const rg of regs) {
+      for (let r = rg.top; r <= rg.bottom; r++) {
+        const dataIndex = dataIndexAt(r)
+        if (dataIndex >= 0 && !rowSeen.has(dataIndex)) {
+          rowSeen.add(dataIndex)
+          rowIndices.push(dataIndex)
+        }
+      }
+      for (let c = rg.left; c <= rg.right; c++) {
+        const columnId = columnIdAt(c)
+        if (columnId && !skip.has(columnId) && !colSeen.has(columnId)) {
+          colSeen.add(columnId)
+          columnIds.push(columnId)
+        }
+      }
     }
 
     const selectable = selectableColumns()
     const firstCol = selectable[0]
     const lastCol = selectable[selectable.length - 1]
     const lastRow = rows().length - 1
-    const fullWidth =
+    const isFullWidth = (rg: CellRect) =>
       firstCol !== undefined &&
       lastCol !== undefined &&
-      rect.left <= firstCol &&
-      rect.right >= lastCol
-    const fullHeight = rect.top <= 0 && rect.bottom >= lastRow
+      rg.left <= firstCol &&
+      rg.right >= lastCol
+    const isFullHeight = (rg: CellRect) => rg.top <= 0 && rg.bottom >= lastRow
+
+    // A whole-column / whole-row selection stays that "kind" even when several
+    // are Ctrl-added, so column/row formatting and header highlighting apply.
+    const everyFullWidth = regs.every(isFullWidth)
+    const everyFullHeight = regs.every(isFullHeight)
+    const singleCell =
+      regs.length === 1 &&
+      regs[0].top === regs[0].bottom &&
+      regs[0].left === regs[0].right
 
     const kind: SelectionScope['kind'] =
-      fullWidth && fullHeight
+      everyFullWidth && everyFullHeight
         ? 'all'
-        : fullWidth
+        : everyFullWidth
           ? 'rows'
-          : fullHeight
+          : everyFullHeight
             ? 'columns'
-            : rect.top === rect.bottom && rect.left === rect.right
+            : singleCell
               ? 'cell'
               : 'range'
 
     return { kind, rowIndices, columnIds }
   })()
+
+  // Visit every distinct (dataIndex, columnId) the selection actually covers,
+  // walking each region so non-contiguous multi-select never spills into the
+  // gaps of its bounding box. Skip columns and grouped rows drop out.
+  const forEachSelectedCell = (
+    cb: (dataIndex: number, columnId: string) => void,
+  ) => {
+    const seen = new Set<string>()
+    for (const rg of allRegions()) {
+      for (let r = rg.top; r <= rg.bottom; r++) {
+        const dataIndex = dataIndexAt(r)
+        if (dataIndex < 0) continue
+        for (let c = rg.left; c <= rg.right; c++) {
+          const columnId = columnIdAt(c)
+          if (!columnId || skip.has(columnId)) continue
+          const key = `${dataIndex}::${columnId}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          cb(dataIndex, columnId)
+        }
+      }
+    }
+  }
 
   // The `tableFormatting` scope keys the selection should be written through:
   // column keys for a column / whole-grid selection (fewest keys that cover it),
@@ -1314,11 +1466,9 @@ export function CellSelectionProvider<T extends RowData>({
       case 'cell':
       case 'range': {
         const keys: string[] = []
-        for (const rowIndex of rowIndices) {
-          for (const columnId of columnIds) {
-            keys.push(cellScopeKey(rowIndex, columnId))
-          }
-        }
+        forEachSelectedCell((rowIndex, columnId) =>
+          keys.push(cellScopeKey(rowIndex, columnId)),
+        )
         return keys
       }
     }
@@ -1350,7 +1500,8 @@ export function CellSelectionProvider<T extends RowData>({
     // range, a full row / column, or the whole grid, so clearing it empties
     // exactly what the user picked.
     clearSelection: () => {
-      if (rect) clearCells(rect)
+      const regs = allRegions()
+      if (regs.length) clearRegions(regs)
     },
   }
 

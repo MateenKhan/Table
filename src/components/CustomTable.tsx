@@ -806,7 +806,10 @@ export function CustomTable<T extends RowData>({
                       Math.abs(event.clientY - start.y) > 4
                     if (moved) return
                   }
-                  selection?.onRowHeaderClick(rowIndex)
+                  selection?.onRowHeaderClick(rowIndex, {
+                    additive: event.ctrlKey || event.metaKey,
+                    extend: event.shiftKey,
+                  })
                 }
               : undefined
           }
@@ -1186,7 +1189,11 @@ export function CustomTable<T extends RowData>({
                   style={letterCellStyle(col)}
                   onClick={
                     isData
-                      ? () => selection?.onColumnHeaderClick(col.id)
+                      ? (e) =>
+                          selection?.onColumnHeaderClick(col.id, {
+                            additive: e.ctrlKey || e.metaKey,
+                            extend: e.shiftKey,
+                          })
                       : isSelectCol
                         ? () => table.toggleAllRowsSelected()
                         : undefined
@@ -1358,7 +1365,10 @@ export function CustomTable<T extends RowData>({
                               Math.abs(event.clientY - start.y) > 4
                             if (moved) return
                           }
-                          selection?.onColumnHeaderClick(header.column.id)
+                          selection?.onColumnHeaderClick(header.column.id, {
+                            additive: event.ctrlKey || event.metaKey,
+                            extend: event.shiftKey,
+                          })
                         }}
                       >
                         {/* Group / sort are now in the selection ops strip; the

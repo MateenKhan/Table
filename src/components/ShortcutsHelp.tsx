@@ -51,6 +51,10 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     items: [
       { keys: ['Shift', '↑↓←→'], label: 'Extend the selection' },
       { keys: ['Shift', 'Home', 'End'], label: 'Extend to the row edge' },
+      { keys: ['Shift', 'Click'], label: 'Extend a contiguous range (cell, row or column)' },
+      { keys: ['Ctrl', 'Click'], label: 'Add a separate cell / row / column (multi-select)' },
+      { keys: ['Ctrl', 'Space'], label: 'Select the active column' },
+      { keys: ['Shift', 'Space'], label: 'Select the active row' },
       { keys: ['Ctrl', 'A'], label: 'Select the whole grid' },
     ],
   },
