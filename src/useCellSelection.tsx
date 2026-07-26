@@ -148,6 +148,9 @@ type Props<T extends RowData> = {
   readOnlyColumns?: string[]
   // Undo / redo stacks. Every write the grid makes is recorded through this.
   history?: HistoryApi
+  // Fired when the selection changes, with the same coordinate-free scope the
+  // grid renders from. Used by the library entry to surface selection to hosts.
+  onSelectionChange?: (scope: SelectionScope) => void
   children: React.ReactNode
 }
 
@@ -158,6 +161,7 @@ export function CellSelectionProvider<T extends RowData>({
   skipColumns = [],
   readOnlyColumns = [],
   history,
+  onSelectionChange,
   children,
 }: Props<T>) {
   const [anchor, setAnchor] = React.useState<CellPos | null>(null)
@@ -1452,6 +1456,26 @@ export function CellSelectionProvider<T extends RowData>({
 
     return { kind, rowIndices, columnIds }
   })()
+
+  // Notify the host when the selection actually changes (not on every render):
+  // a stable string key of the scope gates the callback. The initial mount is
+  // skipped so a consumer only hears about real selection changes.
+  const onSelectionChangeRef = React.useRef(onSelectionChange)
+  onSelectionChangeRef.current = onSelectionChange
+  const selectionScopeRef = React.useRef(selectionScope)
+  selectionScopeRef.current = selectionScope
+  const scopeKey = `${selectionScope.kind}|${selectionScope.rowIndices.join(
+    ',',
+  )}|${selectionScope.columnIds.join(',')}`
+  const scopeMountedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!scopeMountedRef.current) {
+      scopeMountedRef.current = true
+      return
+    }
+    onSelectionChangeRef.current?.(selectionScopeRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey])
 
   // Visit every distinct (dataIndex, columnId) the selection actually covers,
   // walking each region so non-contiguous multi-select never spills into the

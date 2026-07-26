@@ -61,7 +61,9 @@ import PeekActions from './components/PeekActions'
 
 // Restore saved definitions before the first recalculation runs.
 loadStoredFunctions()
-import CellSelectionProvider from './useCellSelection'
+import CellSelectionProvider, {
+  type SelectionScope,
+} from './useCellSelection'
 import useUndoHistory from './useUndoHistory'
 import GlobalSearch from './components/GlobalSearch'
 import PaginationControls from './components/PaginationControls'
@@ -121,6 +123,13 @@ type AppProps = {
   // `@faker-js/faker` (~3 MB), which must NEVER ship inside the published
   // library bundle — only the demo build includes it. Absent → no sample data.
   makeDemoData?: () => Person[]
+  // Fired after the grid's data changes (edit, fill, paste, clear, delete or
+  // row reorder) with the full, current rows — how a library consumer reads
+  // edits back out. Not fired for the initial mount.
+  onDataChange?: (rows: Person[]) => void
+  // Fired when the selection changes, with a coordinate-free description of what
+  // is covered (kind + the data-row indices and column ids it spans).
+  onSelectionChange?: (scope: SelectionScope) => void
 }
 
 export const App = ({
@@ -128,6 +137,8 @@ export const App = ({
   data: dataProp,
   standalone = true,
   makeDemoData,
+  onDataChange,
+  onSelectionChange,
 }: AppProps = {}) => {
   const generateDemoRows = makeDemoData ?? ((): Person[] => [])
   // Which vertical the URL selected (null = default; never in library mode).
@@ -175,6 +186,21 @@ export const App = ({
   const [formulas, setFormulas] = React.useState<FormulaMap>(
     () => (persistedSheet ? (persistedSheet.formulas as FormulaMap) : {}),
   )
+
+  // Surface data edits to a library consumer. `data` already holds computed
+  // formula results, so the callback always sees the effective rows. The very
+  // first render is the initial data the consumer passed in, so it is skipped —
+  // only real changes fire.
+  const onDataChangeRef = React.useRef(onDataChange)
+  onDataChangeRef.current = onDataChange
+  const dataMountedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!dataMountedRef.current) {
+      dataMountedRef.current = true
+      return
+    }
+    onDataChangeRef.current?.(data)
+  }, [data])
 
   const [autoResetPageIndex, skipAutoResetPageIndex] = useSkipper()
 
@@ -815,6 +841,7 @@ export const App = ({
             skipColumns={SKIP_COLUMNS}
             readOnlyColumns={readOnlyColumns}
             history={history}
+            onSelectionChange={onSelectionChange}
           >
             <div className="flex h-full flex-col gap-2">
               {/* The actions div: the query on the left, a contextual peek of

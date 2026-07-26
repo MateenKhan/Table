@@ -11,13 +11,23 @@ import { MotionConfig } from 'framer-motion'
 import type { ColumnDef } from '@tanstack/react-table'
 import { ToastProvider, ConfirmProvider } from './ui'
 import { App } from './App'
+import type { SelectionScope } from './useCellSelection'
+
+type Row = Record<string, unknown>
 
 export type SpreadsheetTableProps = {
   // Column definitions (TanStack Table `ColumnDef`s). Optional — omit for a
   // blank sheet the user builds themselves.
-  columns?: ColumnDef<Record<string, unknown>>[]
+  columns?: ColumnDef<Row>[]
   // Initial rows. Optional — defaults to an empty sheet.
-  data?: Record<string, unknown>[]
+  data?: Row[]
+  // Called after any edit (typing, fill, paste, clear, delete or row reorder)
+  // with the full, current rows — the way to read the user's changes back out.
+  // Not called for the initial `data`.
+  onDataChange?: (rows: Row[]) => void
+  // Called when the selection changes, with a coordinate-free description of
+  // what it covers (kind + the data-row indices and column ids it spans).
+  onSelectionChange?: (scope: SelectionScope) => void
 }
 
 /**
@@ -31,10 +41,16 @@ export type SpreadsheetTableProps = {
  * <SpreadsheetTable
  *   columns={[{ accessorKey: 'name', header: 'Name' }]}
  *   data={[{ name: 'Ada' }]}
+ *   onDataChange={(rows) => console.log(rows)}
  * />
  * ```
  */
-export function SpreadsheetTable({ columns, data }: SpreadsheetTableProps) {
+export function SpreadsheetTable({
+  columns,
+  data,
+  onDataChange,
+  onSelectionChange,
+}: SpreadsheetTableProps) {
   return (
     <MotionConfig reducedMotion="user">
       <ToastProvider>
@@ -43,6 +59,8 @@ export function SpreadsheetTable({ columns, data }: SpreadsheetTableProps) {
             columns={columns as never}
             data={data as never}
             standalone={false}
+            onDataChange={onDataChange as never}
+            onSelectionChange={onSelectionChange}
           />
         </ConfirmProvider>
       </ToastProvider>
@@ -52,3 +70,4 @@ export function SpreadsheetTable({ columns, data }: SpreadsheetTableProps) {
 
 export default SpreadsheetTable
 export type { ColumnDef }
+export type { SelectionScope }
