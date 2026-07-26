@@ -1157,6 +1157,11 @@ export function CustomTable<T extends RowData>({
             />
             {leafColumns.map((col, index) => {
               const isData = !NON_DATA_COLUMN_IDS.includes(col.id)
+              // The row-selection checkbox column: its coordinate cell is a
+              // "select all rows" control — clicking it toggles every row's
+              // checkbox (mirrors the checkbox that lives in its leaf header).
+              const isSelectCol = col.id === 'select'
+              const allRowsSelected = isSelectCol && table.getIsAllRowsSelected()
               // Highlight the coordinate letter when its column is selected
               // (Excel-style — the header/letter lights up, not just the cells).
               const colSelected =
@@ -1170,10 +1175,11 @@ export function CustomTable<T extends RowData>({
                   // the letters stay locked to their columns through drag,
                   // resize, pin and hide.
                   data-col-id={col.id}
+                  title={isSelectCol ? 'Select all rows' : undefined}
                   className={`${gutterCell} px-1 transition-colors ${
-                    colSelected
+                    colSelected || allRowsSelected
                       ? 'bg-accent-500/20 font-semibold text-accent-700'
-                      : isData
+                      : isData || isSelectCol
                         ? 'cursor-pointer sm:hover:bg-slate-200'
                         : ''
                   }`}
@@ -1181,7 +1187,9 @@ export function CustomTable<T extends RowData>({
                   onClick={
                     isData
                       ? () => selection?.onColumnHeaderClick(col.id)
-                      : undefined
+                      : isSelectCol
+                        ? () => table.toggleAllRowsSelected()
+                        : undefined
                   }
                 >
                   {columnLetterList[index]}
