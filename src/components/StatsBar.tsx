@@ -46,26 +46,9 @@ export default function StatsBar({ table }: Props) {
 
   if (!scope || scope.kind === 'none') return null
 
-  // rowIndices are DATA indices; columnIds already exclude skip columns. When a
-  // kind implies "all rows" / "all columns" and an axis came through empty, fall
-  // back to every visible data row / leaf column accordingly.
-  const rowIndices =
-    scope.rowIndices.length > 0
-      ? scope.rowIndices
-      : table
-          .getRowModel()
-          .rows.filter((r) => !r.getIsGrouped())
-          .map((r) => r.index)
-
-  const columnIds =
-    scope.columnIds.length > 0
-      ? scope.columnIds
-      : table.getVisibleLeafColumns().map((c) => c.id)
-
-  const totalCells = rowIndices.length * columnIds.length
-  // Only a genuine multi-cell selection earns a stats bar; a single cell is not
-  // worth the clutter.
-  if (totalCells <= 1) return null
+  // columnIds already exclude skip columns; used only to decide whether one
+  // numeric column's meta should drive the Sum / Avg / Min / Max formatting.
+  const columnIds = scope.columnIds
 
   const data = table.options.data as Record<string, unknown>[]
 
@@ -77,35 +60,37 @@ export default function StatsBar({ table }: Props) {
       : undefined
   const useColumnFormat = !!singleColumnMeta && isNumericType(singleColumnMeta.type)
 
+  let cellsSeen = 0 // distinct selected cells (empty or not)
   let count = 0 // non-empty selected cells
   let numericCount = 0
   let sum = 0
   let min = Infinity
   let max = -Infinity
-  let scanned = 0
   let capped = false
 
-  outer: for (const rowIndex of rowIndices) {
-    const row = data[rowIndex]
-    if (!row) continue
-    for (const columnId of columnIds) {
-      if (scanned >= SCAN_CAP) {
-        capped = true
-        break outer
-      }
-      scanned++
-      const value = row[columnId]
-      if (isEmpty(value)) continue
-      count++
-      const n = asNumber(value)
-      if (n !== null) {
-        numericCount++
-        sum += n
-        if (n < min) min = n
-        if (n > max) max = n
-      }
+  // Walk the ACTUAL selected cells (each region in turn) so a non-contiguous
+  // multi-selection never counts cells that only fall inside its bounding box.
+  selection?.forEachSelectedCell((rowIndex, columnId) => {
+    if (cellsSeen >= SCAN_CAP) {
+      capped = true
+      return false
     }
-  }
+    cellsSeen++
+    const value = data[rowIndex]?.[columnId]
+    if (isEmpty(value)) return
+    count++
+    const n = asNumber(value)
+    if (n !== null) {
+      numericCount++
+      sum += n
+      if (n < min) min = n
+      if (n > max) max = n
+    }
+  })
+
+  // Only a genuine multi-cell selection earns a stats bar; a single cell is not
+  // worth the clutter.
+  if (cellsSeen <= 1) return null
 
   const hasNumbers = numericCount > 0
   const average = hasNumbers ? sum / numericCount : 0

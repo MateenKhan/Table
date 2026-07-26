@@ -107,6 +107,12 @@ export type CellSelectionApi = {
   // through (column keys for a column selection, row keys for a row selection,
   // cell keys for a cell / range, etc.). Empty when nothing is selected.
   getFormatScopeKeys: () => string[]
+  // Walk every distinct (dataIndex, columnId) the selection actually covers,
+  // region by region (so non-contiguous selections never include the gaps of
+  // their bounding box). Return `false` from the callback to stop early.
+  forEachSelectedCell: (
+    cb: (dataIndex: number, columnId: string) => void | boolean,
+  ) => void
   // Clear the CONTENTS of whatever is currently selected — a cell, a range, a
   // whole row / column, or the whole grid — emptying every writable cell and
   // dropping its formula. No-op when nothing is selected. Undoable.
@@ -558,6 +564,10 @@ export function CellSelectionProvider<T extends RowData>({
   rectRef.current = rect
   const regionsRef = React.useRef(regions)
   regionsRef.current = regions
+  // The cell a Ctrl+Space / Ctrl+click last added, i.e. the anchor a following
+  // Shift+Space extends its contiguous range from. Cleared on a fresh (plain)
+  // selection.
+  const multiAnchorRef = React.useRef<CellPos | null>(null)
   const anchorRef = React.useRef(anchor)
   anchorRef.current = anchor
   const fillTargetRef = React.useRef(fillTarget)
@@ -814,10 +824,12 @@ export function CellSelectionProvider<T extends RowData>({
       setFocus(pos)
     } else if (additive && rect) {
       setRegions((prev) => [...prev, rect])
+      multiAnchorRef.current = pos
       setAnchor(pos)
       setFocus(pos)
     } else {
       setRegions([])
+      multiAnchorRef.current = null
       setAnchor(pos)
       setFocus(pos)
     }
@@ -845,6 +857,7 @@ export function CellSelectionProvider<T extends RowData>({
     const columnId = columnIdAt(pos.col)
     if (!columnId || readOnly.has(columnId)) return
     setRegions([])
+    multiAnchorRef.current = null
     setAnchor(pos)
     setFocus(pos)
     beginEdit(pos)
@@ -915,6 +928,7 @@ export function CellSelectionProvider<T extends RowData>({
     dragMode.current = 'none'
     focusGrid()
     setRegions([])
+    multiAnchorRef.current = null
     setAnchor({ row: 0, col: 0 })
     setFocus({ row: lastRow, col: lastCol })
   }
@@ -1022,8 +1036,8 @@ export function CellSelectionProvider<T extends RowData>({
   // when `extend`, otherwise collapses onto the new cell.
   const moveTo = (target: CellPos, extend: boolean) => {
     if (!isSelectable(target)) return
-    // Keyboard navigation collapses any non-contiguous multi-selection.
-    setRegions([])
+    // The live cell moves; banked (Ctrl+Space / Ctrl+click) regions persist so
+    // a multi-selection can be built entirely from the keyboard.
     setFocus(target)
     if (!extend) setAnchor(target)
   }
@@ -1031,8 +1045,6 @@ export function CellSelectionProvider<T extends RowData>({
   const move = (rowDelta: number, colDelta: number, extend: boolean) => {
     const from = extend ? focus : anchor
     if (!from) return
-    // Keyboard navigation collapses any non-contiguous multi-selection.
-    setRegions([])
 
     let next: CellPos = { row: from.row, col: from.col }
     if (colDelta) next = nextSelectableColumn(next, colDelta) ?? next
@@ -1144,29 +1156,42 @@ export function CellSelectionProvider<T extends RowData>({
           event.preventDefault()
           return move(PAGE_ROWS, 0, extend)
         case ' ':
-          // Space acts like a click: Ctrl+Space selects the active column(s),
-          // Shift+Space the active row(s) — the keyboard twin of Ctrl/Shift +
-          // clicking a header. Plain space falls through to start an edit.
-          if ((accel || event.shiftKey) && rectRef.current) {
+          // Space acts like a click. Ctrl+Space is the keyboard twin of
+          // Ctrl+click: it banks the live cell/range as a separate region so a
+          // non-contiguous selection can be grown with the arrow keys.
+          // Shift+Space is Shift+click: it extends the last-added region from
+          // its anchor to the active cell. Plain space starts an edit.
+          if (accel && rectRef.current && anchorRef.current) {
             event.preventDefault()
-            const r = rectRef.current
-            if (accel) {
-              const lastRow = rows().length - 1
-              if (lastRow < 0) return
-              setAnchor({ row: 0, col: r.left })
-              setFocus({ row: lastRow, col: r.right })
-            } else {
-              const lastCol = columnIds().length - 1
-              if (lastCol < 0) return
-              setAnchor({ row: r.top, col: 0 })
-              setFocus({ row: r.bottom, col: lastCol })
+            const live = rectRef.current
+            setRegions((prev) => [...prev, live])
+            multiAnchorRef.current = anchorRef.current
+            return
+          }
+          if (event.shiftKey && anchorRef.current) {
+            event.preventDefault()
+            const from = multiAnchorRef.current ?? anchorRef.current
+            const to = anchorRef.current
+            const ext: CellRect = {
+              top: Math.min(from.row, to.row),
+              bottom: Math.max(from.row, to.row),
+              left: Math.min(from.col, to.col),
+              right: Math.max(from.col, to.col),
             }
+            // Replace the region the anchor opened with its extended range;
+            // with no prior Ctrl+Space, add the active cell as a new region.
+            setRegions((prev) =>
+              multiAnchorRef.current && prev.length
+                ? [...prev.slice(0, -1), ext]
+                : [...prev, ext],
+            )
             return
           }
           break
         case 'Escape':
           event.preventDefault()
           setRegions([])
+          multiAnchorRef.current = null
           setAnchor(null)
           setFocus(null)
           return
@@ -1250,6 +1275,7 @@ export function CellSelectionProvider<T extends RowData>({
     setEditing(null)
     setFillTarget(null)
     setRegions([])
+    multiAnchorRef.current = null
   }, [viewSignature])
 
   /* ------------------------------------------------------------ rendering */
@@ -1429,9 +1455,10 @@ export function CellSelectionProvider<T extends RowData>({
 
   // Visit every distinct (dataIndex, columnId) the selection actually covers,
   // walking each region so non-contiguous multi-select never spills into the
-  // gaps of its bounding box. Skip columns and grouped rows drop out.
+  // gaps of its bounding box. Skip columns and grouped rows drop out. A callback
+  // that returns `false` stops the walk (used to honour a scan cap).
   const forEachSelectedCell = (
-    cb: (dataIndex: number, columnId: string) => void,
+    cb: (dataIndex: number, columnId: string) => void | boolean,
   ) => {
     const seen = new Set<string>()
     for (const rg of allRegions()) {
@@ -1444,7 +1471,7 @@ export function CellSelectionProvider<T extends RowData>({
           const key = `${dataIndex}::${columnId}`
           if (seen.has(key)) continue
           seen.add(key)
-          cb(dataIndex, columnId)
+          if (cb(dataIndex, columnId) === false) return
         }
       }
     }
@@ -1466,9 +1493,9 @@ export function CellSelectionProvider<T extends RowData>({
       case 'cell':
       case 'range': {
         const keys: string[] = []
-        forEachSelectedCell((rowIndex, columnId) =>
-          keys.push(cellScopeKey(rowIndex, columnId)),
-        )
+        forEachSelectedCell((rowIndex, columnId) => {
+          keys.push(cellScopeKey(rowIndex, columnId))
+        })
         return keys
       }
     }
@@ -1503,6 +1530,7 @@ export function CellSelectionProvider<T extends RowData>({
       const regs = allRegions()
       if (regs.length) clearRegions(regs)
     },
+    forEachSelectedCell,
   }
 
   return (
