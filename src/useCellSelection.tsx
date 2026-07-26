@@ -78,15 +78,19 @@ export type CellSelectionApi = {
   // Excel-style whole-column selection off a header click (by column id).
   // `extend` (Shift) grows a contiguous column range from the anchor column;
   // `additive` (Ctrl) adds it as a separate region for non-contiguous select.
+  // `event` is threaded through so the host `onColumnHeaderClick` hook can
+  // report it.
   onColumnHeaderClick: (
     columnId: string,
     mods?: { additive?: boolean; extend?: boolean },
+    event?: React.MouseEvent,
   ) => void
   // Excel-style whole-row selection off a row-number click (by screen row).
   // Same `extend` / `additive` modifiers as `onColumnHeaderClick`.
   onRowHeaderClick: (
     screenRow: number,
     mods?: { additive?: boolean; extend?: boolean },
+    event?: React.MouseEvent,
   ) => void
   // The corner "select all" gesture: the whole grid.
   onSelectAll: () => void
@@ -168,6 +172,12 @@ type Props<T extends RowData> = {
   onCellActivate?: (info: CellEventInfo) => void
   onCellClick?: (info: CellEventInfo, event: React.MouseEvent) => void
   onCellKeyDown?: (info: CellEventInfo, event: KeyboardEvent) => void
+  // Fired when a column header / letter (A, B, C…) is clicked, with the column
+  // id, and when a row-number gutter (1, 2, 3…) is clicked, with the DATA-row
+  // index — plus the native event. These fire in addition to the selection the
+  // click makes.
+  onColumnHeaderClick?: (columnId: string, event: React.MouseEvent) => void
+  onRowHeaderClick?: (rowIndex: number, event: React.MouseEvent) => void
   children: React.ReactNode
 }
 
@@ -182,6 +192,10 @@ export function CellSelectionProvider<T extends RowData>({
   onCellActivate,
   onCellClick,
   onCellKeyDown,
+  // Aliased so they don't shadow the internal onColumnHeaderClick /
+  // onRowHeaderClick selection methods below.
+  onColumnHeaderClick: onColumnHeaderClickCb,
+  onRowHeaderClick: onRowHeaderClickCb,
   children,
 }: Props<T>) {
   const [anchor, setAnchor] = React.useState<CellPos | null>(null)
@@ -286,6 +300,10 @@ export function CellSelectionProvider<T extends RowData>({
   onCellClickRef.current = onCellClick
   const onCellKeyDownRef = React.useRef(onCellKeyDown)
   onCellKeyDownRef.current = onCellKeyDown
+  const onColumnHeaderClickCbRef = React.useRef(onColumnHeaderClickCb)
+  onColumnHeaderClickCbRef.current = onColumnHeaderClickCb
+  const onRowHeaderClickCbRef = React.useRef(onRowHeaderClickCb)
+  onRowHeaderClickCbRef.current = onRowHeaderClickCb
 
   /* --------------------------------------------------------- the focus sink */
 
@@ -919,8 +937,12 @@ export function CellSelectionProvider<T extends RowData>({
   const onColumnHeaderClick = (
     columnId: string,
     mods: { additive?: boolean; extend?: boolean } = {},
+    event?: React.MouseEvent,
   ) => {
     if (skip.has(columnId)) return
+    // Host hook: a column header / letter was clicked (before the selection).
+    if (event && onColumnHeaderClickCbRef.current)
+      onColumnHeaderClickCbRef.current(columnId, event)
     const col = columnIds().indexOf(columnId)
     if (col < 0) return
     const lastRow = rows().length - 1
@@ -947,8 +969,13 @@ export function CellSelectionProvider<T extends RowData>({
   const onRowHeaderClick = (
     screenRow: number,
     mods: { additive?: boolean; extend?: boolean } = {},
+    event?: React.MouseEvent,
   ) => {
-    if (dataIndexAt(screenRow) < 0) return
+    const rowDataIndex = dataIndexAt(screenRow)
+    if (rowDataIndex < 0) return
+    // Host hook: a row-number gutter was clicked (with the DATA-row index).
+    if (event && onRowHeaderClickCbRef.current)
+      onRowHeaderClickCbRef.current(rowDataIndex, event)
     const lastCol = columnIds().length - 1
     if (lastCol < 0) return
     setEditing(null)

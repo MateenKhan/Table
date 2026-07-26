@@ -152,6 +152,10 @@ type AppProps = {
   onCellActivate?: (info: CellEventInfo) => void
   onCellClick?: (info: CellEventInfo, event: React.MouseEvent) => void
   onCellKeyDown?: (info: CellEventInfo, event: KeyboardEvent) => void
+  // Fired on a column header / letter (A, B, C…) click and a row-number gutter
+  // (1, 2, 3…) click, with the column id / data-row index and the native event.
+  onColumnHeaderClick?: (columnId: string, event: React.MouseEvent) => void
+  onRowHeaderClick?: (rowIndex: number, event: React.MouseEvent) => void
 }
 
 export const App = ({
@@ -168,6 +172,8 @@ export const App = ({
   onCellActivate,
   onCellClick,
   onCellKeyDown,
+  onColumnHeaderClick,
+  onRowHeaderClick,
 }: AppProps = {}) => {
   const generateDemoRows = makeDemoData ?? ((): Person[] => [])
   // Which vertical the URL selected (null = default; never in library mode).
@@ -931,6 +937,8 @@ export const App = ({
             onCellActivate={onCellActivate}
             onCellClick={onCellClick}
             onCellKeyDown={onCellKeyDown}
+            onColumnHeaderClick={onColumnHeaderClick}
+            onRowHeaderClick={onRowHeaderClick}
           >
             <div className="flex h-full flex-col gap-2">
               {/* The actions div: the query on the left, a contextual peek of

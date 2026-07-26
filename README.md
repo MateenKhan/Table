@@ -69,6 +69,8 @@ Give `rows` and `cols` instead of `columns`/`data` to drop the user into an empt
 | `onCellActivate` | `(info: CellEventInfo) => void` | Fires when a cell becomes active **by click or keyboard** — ideal for triggering an animation elsewhere in your app. |
 | `onCellClick` | `(info, event) => void` | Cell click, with the native `MouseEvent`. |
 | `onCellKeyDown` | `(info, event) => void` | Key pressed while a cell is active, with the native `KeyboardEvent`. |
+| `onColumnHeaderClick` | `(columnId, event) => void` | A column header / letter (A, B, C…) was clicked. |
+| `onRowHeaderClick` | `(rowIndex, event) => void` | A row-number gutter (1, 2, 3…) was clicked. |
 
 `CellEventInfo` is `{ rowIndex, columnId, value }`; `ColumnInfo` is `{ id, header, type? }`. Types are exported alongside the component.
 

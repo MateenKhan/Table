@@ -806,10 +806,14 @@ export function CustomTable<T extends RowData>({
                       Math.abs(event.clientY - start.y) > 4
                     if (moved) return
                   }
-                  selection?.onRowHeaderClick(rowIndex, {
-                    additive: event.ctrlKey || event.metaKey,
-                    extend: event.shiftKey,
-                  })
+                  selection?.onRowHeaderClick(
+                    rowIndex,
+                    {
+                      additive: event.ctrlKey || event.metaKey,
+                      extend: event.shiftKey,
+                    },
+                    event,
+                  )
                 }
               : undefined
           }
@@ -1190,10 +1194,14 @@ export function CustomTable<T extends RowData>({
                   onClick={
                     isData
                       ? (e) =>
-                          selection?.onColumnHeaderClick(col.id, {
-                            additive: e.ctrlKey || e.metaKey,
-                            extend: e.shiftKey,
-                          })
+                          selection?.onColumnHeaderClick(
+                            col.id,
+                            {
+                              additive: e.ctrlKey || e.metaKey,
+                              extend: e.shiftKey,
+                            },
+                            e,
+                          )
                       : isSelectCol
                         ? () => table.toggleAllRowsSelected()
                         : undefined
@@ -1365,10 +1373,14 @@ export function CustomTable<T extends RowData>({
                               Math.abs(event.clientY - start.y) > 4
                             if (moved) return
                           }
-                          selection?.onColumnHeaderClick(header.column.id, {
-                            additive: event.ctrlKey || event.metaKey,
-                            extend: event.shiftKey,
-                          })
+                          selection?.onColumnHeaderClick(
+                            header.column.id,
+                            {
+                              additive: event.ctrlKey || event.metaKey,
+                              extend: event.shiftKey,
+                            },
+                            event,
+                          )
                         }}
                       >
                         {/* Group / sort are now in the selection ops strip; the

@@ -47,6 +47,11 @@ export type SpreadsheetTableProps = {
   // cell info and the native event.
   onCellClick?: (info: CellEventInfo, event: React.MouseEvent) => void
   onCellKeyDown?: (info: CellEventInfo, event: KeyboardEvent) => void
+  // Called when a column header / letter (A, B, C…) is clicked, and when a
+  // row-number gutter (1, 2, 3…) is clicked — with the column id / data-row
+  // index and the native event.
+  onColumnHeaderClick?: (columnId: string, event: React.MouseEvent) => void
+  onRowHeaderClick?: (rowIndex: number, event: React.MouseEvent) => void
 }
 
 /**
@@ -76,6 +81,8 @@ export function SpreadsheetTable({
   onCellActivate,
   onCellClick,
   onCellKeyDown,
+  onColumnHeaderClick,
+  onRowHeaderClick,
 }: SpreadsheetTableProps) {
   return (
     <MotionConfig reducedMotion="user">
@@ -94,6 +101,8 @@ export function SpreadsheetTable({
             onCellActivate={onCellActivate}
             onCellClick={onCellClick}
             onCellKeyDown={onCellKeyDown}
+            onColumnHeaderClick={onColumnHeaderClick}
+            onRowHeaderClick={onRowHeaderClick}
           />
         </ConfirmProvider>
       </ToastProvider>
