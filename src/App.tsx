@@ -63,7 +63,13 @@ import PeekActions from './components/PeekActions'
 loadStoredFunctions()
 import CellSelectionProvider, {
   type SelectionScope,
+  type CellEventInfo,
 } from './useCellSelection'
+
+// A light, serialisable description of a column, handed to `onColumnChange` so a
+// host learns the current schema (id / header text / cell type) without seeing
+// internal TanStack column defs.
+export type ColumnInfo = { id: string; header: string; type?: string }
 import useUndoHistory from './useUndoHistory'
 import GlobalSearch from './components/GlobalSearch'
 import PaginationControls from './components/PaginationControls'
@@ -123,13 +129,29 @@ type AppProps = {
   // `@faker-js/faker` (~3 MB), which must NEVER ship inside the published
   // library bundle — only the demo build includes it. Absent → no sample data.
   makeDemoData?: () => Person[]
+  // Blank-sheet size for a library embed with no `columns`/`data`: `cols`
+  // generic text columns and `rows` empty rows the user fills in. Ignored once
+  // explicit columns or data are given.
+  rows?: number
+  cols?: number
   // Fired after the grid's data changes (edit, fill, paste, clear, delete or
   // row reorder) with the full, current rows — how a library consumer reads
   // edits back out. Not fired for the initial mount.
   onDataChange?: (rows: Person[]) => void
+  // Fired for each individual cell whose value changes (typing, fill, paste,
+  // clear, undo/redo), with the data-row index, column id and new value.
+  onCellChange?: (rowIndex: number, columnId: string, value: unknown) => void
+  // Fired when the column model changes (add / remove / rename / retype /
+  // reorder / hide) with a light description of the current columns.
+  onColumnChange?: (columns: ColumnInfo[]) => void
   // Fired when the selection changes, with a coordinate-free description of what
   // is covered (kind + the data-row indices and column ids it spans).
   onSelectionChange?: (scope: SelectionScope) => void
+  // Cell interaction hooks (see CellSelectionProvider): activation (click or
+  // keyboard), click, and keydown-on-the-active-cell.
+  onCellActivate?: (info: CellEventInfo) => void
+  onCellClick?: (info: CellEventInfo, event: React.MouseEvent) => void
+  onCellKeyDown?: (info: CellEventInfo, event: KeyboardEvent) => void
 }
 
 export const App = ({
@@ -137,8 +159,15 @@ export const App = ({
   data: dataProp,
   standalone = true,
   makeDemoData,
+  rows: rowsProp,
+  cols: colsProp,
   onDataChange,
+  onCellChange,
+  onColumnChange,
   onSelectionChange,
+  onCellActivate,
+  onCellClick,
+  onCellKeyDown,
 }: AppProps = {}) => {
   const generateDemoRows = makeDemoData ?? ((): Person[] => [])
   // Which vertical the URL selected (null = default; never in library mode).
@@ -167,11 +196,27 @@ export const App = ({
     [activeVertical, selectedProfileIds],
   )
 
+  // A blank N×M sheet for a library embed given `rows`/`cols` but no explicit
+  // columns/data: `cols` generic text columns (col1…colN) and `rows` empty rows.
+  const blankSheet = React.useMemo(() => {
+    if (standalone || columnsProp || dataProp) return null
+    if (!colsProp && !rowsProp) return null
+    const columns = blankColumns(
+      Math.max(1, colsProp ?? 6),
+    ) as unknown as typeof baseColumns
+    const ids = columns.map((c) => String((c as { id: string }).id))
+    return {
+      columns,
+      data: blankRows(Math.max(0, rowsProp ?? 0), ids) as unknown as Person[],
+    }
+  }, [standalone, columnsProp, dataProp, colsProp, rowsProp])
+
   const [data, setData] = React.useState<Person[]>(() => {
-    // A consumer's `data` prop always wins; a library embed with no data starts
-    // empty. Otherwise the standalone demo restores a saved sheet / profile /
-    // random sample as before.
+    // A consumer's `data` prop always wins, then a `rows`/`cols` blank sheet; a
+    // library embed with nothing starts empty. Otherwise the standalone demo
+    // restores a saved sheet / profile / random sample as before.
     if (dataProp) return dataProp
+    if (blankSheet) return blankSheet.data
     if (!standalone) return []
     if (persistedSheet) return persistedSheet.data as unknown as Person[]
     if (activeVertical && activeVertical.defaultSelected?.length) {
@@ -204,10 +249,19 @@ export const App = ({
 
   const [autoResetPageIndex, skipAutoResetPageIndex] = useSkipper()
 
+  // `onCellChange` fires from inside the table meta's cell writers (the single
+  // path every edit / fill / paste / clear / undo-redo flows through). Read
+  // through a ref so the memoised meta always calls the latest callback.
+  const onCellChangeRef = React.useRef(onCellChange)
+  onCellChangeRef.current = onCellChange
+
   // One instance for the life of the table: the undo stacks are keyed to the
   // rows currently in `data`, and `updateCells` is how a patch is replayed.
   const tableMeta = React.useMemo(
-    () => getTableMeta(setData, skipAutoResetPageIndex),
+    () =>
+      getTableMeta(setData, skipAutoResetPageIndex, (rowIndex, columnId, value) =>
+        onCellChangeRef.current?.(rowIndex, columnId, value),
+      ),
     [skipAutoResetPageIndex],
   )
 
@@ -305,11 +359,13 @@ export const App = ({
   // rename, extend (add column), and fill (add row) to store their own data.
   const [customColumns, setCustomColumns] = React.useState<
     typeof baseColumns | null
-  >(() =>
-    persistedSheet
+  >(() => {
+    // A `rows`/`cols` blank sheet supplies its own generic columns.
+    if (blankSheet) return blankSheet.columns
+    return persistedSheet
       ? (persistedSheet.customColumns as unknown as typeof baseColumns)
-      : null,
-  )
+      : null
+  })
   const isCustomSchema = customColumns !== null
 
   // Persist the user's own sheet (debounced) whenever it changes — but ONLY the
@@ -668,6 +724,36 @@ export const App = ({
     debugColumns: true,
   })
 
+  // Surface column-model changes (add / remove / rename / retype / reorder /
+  // hide) to a host as a light schema description. Recomputed each render (few
+  // columns) and gated on a stable key so the callback only fires on real
+  // changes, never on the initial mount.
+  const columnInfos: ColumnInfo[] = table
+    .getVisibleLeafColumns()
+    .filter((col) => !SKIP_COLUMNS.includes(col.id))
+    .map((col) => ({
+      id: col.id,
+      header:
+        typeof col.columnDef.header === 'string' ? col.columnDef.header : col.id,
+      type: (col.columnDef.meta as { type?: string } | undefined)?.type,
+    }))
+  const columnInfosRef = React.useRef(columnInfos)
+  columnInfosRef.current = columnInfos
+  const onColumnChangeRef = React.useRef(onColumnChange)
+  onColumnChangeRef.current = onColumnChange
+  const columnKey = columnInfos
+    .map((c) => `${c.id}:${c.header}:${c.type ?? ''}`)
+    .join('|')
+  const columnMountedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!columnMountedRef.current) {
+      columnMountedRef.current = true
+      return
+    }
+    onColumnChangeRef.current?.(columnInfosRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columnKey])
+
   // Columns Find & replace may target (skip / read-only columns excluded from
   // being replaced into).
   const findReplaceColumns = React.useMemo(
@@ -842,6 +928,9 @@ export const App = ({
             readOnlyColumns={readOnlyColumns}
             history={history}
             onSelectionChange={onSelectionChange}
+            onCellActivate={onCellActivate}
+            onCellClick={onCellClick}
+            onCellKeyDown={onCellKeyDown}
           >
             <div className="flex h-full flex-col gap-2">
               {/* The actions div: the query on the left, a contextual peek of

@@ -187,6 +187,10 @@ export const columns: ColumnDef<Person>[] = [
 export const getTableMeta = (
   setData: React.Dispatch<React.SetStateAction<Person[]>>,
   skipAutoResetPageIndex: () => void,
+  // Optional host hook fired once per cell whose value is written, AFTER the
+  // update is queued. Kept outside the state updater so React StrictMode's
+  // double-invocation of the updater never double-fires it.
+  onCellChange?: (rowIndex: number, columnId: string, value: unknown) => void,
 ) =>
   ({
     updateData: (rowIndex, columnId, value) => {
@@ -202,6 +206,7 @@ export const getTableMeta = (
           }
         }),
       )
+      onCellChange?.(rowIndex, columnId, value)
     },
     updateCells: (updates) => {
       if (!updates.length) return
@@ -228,5 +233,12 @@ export const getTableMeta = (
         })
         return next
       })
+      // Report each written cell. Fired outside the updater (see note above);
+      // updates for non-existent rows are harmless — the host just hears a value.
+      if (onCellChange) {
+        for (const { rowIndex, columnId, value } of updates) {
+          onCellChange(rowIndex, columnId, value)
+        }
+      }
     },
   }) as TableMeta

@@ -9,9 +9,10 @@ import './index.css'
 
 import { MotionConfig } from 'framer-motion'
 import type { ColumnDef } from '@tanstack/react-table'
+import type React from 'react'
 import { ToastProvider, ConfirmProvider } from './ui'
-import { App } from './App'
-import type { SelectionScope } from './useCellSelection'
+import { App, type ColumnInfo } from './App'
+import type { SelectionScope, CellEventInfo } from './useCellSelection'
 
 type Row = Record<string, unknown>
 
@@ -21,13 +22,31 @@ export type SpreadsheetTableProps = {
   columns?: ColumnDef<Row>[]
   // Initial rows. Optional — defaults to an empty sheet.
   data?: Row[]
+  // Blank sheet size when no `columns`/`data` are given: `cols` generic text
+  // columns and `rows` empty rows the user fills in. e.g. rows={4} cols={4}.
+  rows?: number
+  cols?: number
   // Called after any edit (typing, fill, paste, clear, delete or row reorder)
   // with the full, current rows — the way to read the user's changes back out.
   // Not called for the initial `data`.
   onDataChange?: (rows: Row[]) => void
+  // Called for each individual cell whose value changes, with the data-row
+  // index, column id and new value. Fires for typing, fill, paste, clear and
+  // undo/redo.
+  onCellChange?: (rowIndex: number, columnId: string, value: unknown) => void
+  // Called when the columns change (add / remove / rename / retype / reorder /
+  // hide) with a light description of the current columns.
+  onColumnChange?: (columns: ColumnInfo[]) => void
   // Called when the selection changes, with a coordinate-free description of
   // what it covers (kind + the data-row indices and column ids it spans).
   onSelectionChange?: (scope: SelectionScope) => void
+  // Called when a cell becomes the active cell — by click OR keyboard. Ideal
+  // for triggering effects/animations elsewhere in your app on cell activation.
+  onCellActivate?: (info: CellEventInfo) => void
+  // Called on a cell click / on a key pressed while a cell is active, with the
+  // cell info and the native event.
+  onCellClick?: (info: CellEventInfo, event: React.MouseEvent) => void
+  onCellKeyDown?: (info: CellEventInfo, event: KeyboardEvent) => void
 }
 
 /**
@@ -48,8 +67,15 @@ export type SpreadsheetTableProps = {
 export function SpreadsheetTable({
   columns,
   data,
+  rows,
+  cols,
   onDataChange,
+  onCellChange,
+  onColumnChange,
   onSelectionChange,
+  onCellActivate,
+  onCellClick,
+  onCellKeyDown,
 }: SpreadsheetTableProps) {
   return (
     <MotionConfig reducedMotion="user">
@@ -58,9 +84,16 @@ export function SpreadsheetTable({
           <App
             columns={columns as never}
             data={data as never}
+            rows={rows}
+            cols={cols}
             standalone={false}
             onDataChange={onDataChange as never}
+            onCellChange={onCellChange}
+            onColumnChange={onColumnChange}
             onSelectionChange={onSelectionChange}
+            onCellActivate={onCellActivate}
+            onCellClick={onCellClick}
+            onCellKeyDown={onCellKeyDown}
           />
         </ConfirmProvider>
       </ToastProvider>
@@ -70,4 +103,4 @@ export function SpreadsheetTable({
 
 export default SpreadsheetTable
 export type { ColumnDef }
-export type { SelectionScope }
+export type { SelectionScope, CellEventInfo, ColumnInfo }

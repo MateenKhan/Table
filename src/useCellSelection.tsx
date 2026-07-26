@@ -55,6 +55,16 @@ export type SelectionScope = {
   columnIds: string[]
 }
 
+// Identity + current value of a single cell, handed to the interaction-event
+// callbacks (onCellActivate / onCellClick / onCellKeyDown) so a host can react —
+// e.g. trigger an animation elsewhere — knowing exactly which cell fired.
+export type CellEventInfo = {
+  // DATA-row index (stable across sort / filter / paging), not the screen row.
+  rowIndex: number
+  columnId: string
+  value: unknown
+}
+
 export type CellSelectionApi = {
   editingKey: string | null
   // The anchor cell, in the same `${rowId}::${columnId}` form as `editingKey`.
@@ -151,6 +161,13 @@ type Props<T extends RowData> = {
   // Fired when the selection changes, with the same coordinate-free scope the
   // grid renders from. Used by the library entry to surface selection to hosts.
   onSelectionChange?: (scope: SelectionScope) => void
+  // Interaction hooks (all optional) a host can use to react to cell activity —
+  // e.g. run an animation in its own UI. `onCellActivate` fires whenever a cell
+  // becomes the active cell (by click OR keyboard navigation); `onCellClick`
+  // and `onCellKeyDown` fire for those specific inputs, with the native event.
+  onCellActivate?: (info: CellEventInfo) => void
+  onCellClick?: (info: CellEventInfo, event: React.MouseEvent) => void
+  onCellKeyDown?: (info: CellEventInfo, event: KeyboardEvent) => void
   children: React.ReactNode
 }
 
@@ -162,6 +179,9 @@ export function CellSelectionProvider<T extends RowData>({
   readOnlyColumns = [],
   history,
   onSelectionChange,
+  onCellActivate,
+  onCellClick,
+  onCellKeyDown,
   children,
 }: Props<T>) {
   const [anchor, setAnchor] = React.useState<CellPos | null>(null)
@@ -248,6 +268,24 @@ export function CellSelectionProvider<T extends RowData>({
     if (!columnId || skip.has(columnId)) return false
     return dataIndexAt(pos.row) >= 0
   }
+
+  // Identity + current value of the cell at a screen position, for the host
+  // interaction callbacks. Null on a non-data cell (grouped row / skip column).
+  const cellInfoAt = (pos: CellPos): CellEventInfo | null => {
+    const dataIndex = dataIndexAt(pos.row)
+    const columnId = columnIdAt(pos.col)
+    if (dataIndex < 0 || !columnId) return null
+    return { rowIndex: dataIndex, columnId, value: dataRows()[dataIndex]?.[columnId] }
+  }
+
+  // Latest host interaction callbacks, kept in refs so the window keydown
+  // listener and per-render handlers always see the current ones.
+  const onCellActivateRef = React.useRef(onCellActivate)
+  onCellActivateRef.current = onCellActivate
+  const onCellClickRef = React.useRef(onCellClick)
+  onCellClickRef.current = onCellClick
+  const onCellKeyDownRef = React.useRef(onCellKeyDown)
+  onCellKeyDownRef.current = onCellKeyDown
 
   /* --------------------------------------------------------- the focus sink */
 
@@ -838,6 +876,13 @@ export function CellSelectionProvider<T extends RowData>({
       setFocus(pos)
     }
     dragMode.current = 'select'
+
+    // Host hook: a cell was clicked (fired on the selecting mousedown, which is
+    // when the active cell changes).
+    if (onCellClickRef.current) {
+      const info = cellInfoAt(pos)
+      if (info) onCellClickRef.current(info, event)
+    }
   }
 
   const onCellMouseEnter = (pos: CellPos) => {
@@ -1117,6 +1162,14 @@ export function CellSelectionProvider<T extends RowData>({
       // Everything below drives the active cell, so it must not fire while a
       // toolbar control or the query input holds focus (those own their keys).
       if (!navAllowed()) return
+
+      // Host hook: a key was pressed while a cell is active. Fired before the
+      // grid acts on the key, with the native event (which the host can inspect
+      // but should not preventDefault — the grid still handles navigation).
+      if (onCellKeyDownRef.current) {
+        const info = cellInfoAt(anchor)
+        if (info) onCellKeyDownRef.current(info, event)
+      }
 
       const extend = event.shiftKey
       const base = extend ? focus : anchor
@@ -1476,6 +1529,25 @@ export function CellSelectionProvider<T extends RowData>({
     onSelectionChangeRef.current?.(selectionScopeRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey])
+
+  // Host hook: fire whenever the ACTIVE cell changes — by click or by keyboard
+  // navigation — so a host can react (e.g. run an animation) on activation. The
+  // active cell is the anchor; `activeKey` changing is exactly that event. The
+  // initial mount is skipped.
+  const anchorForActivateRef = React.useRef(anchor)
+  anchorForActivateRef.current = anchor
+  const activateMountedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!activateMountedRef.current) {
+      activateMountedRef.current = true
+      return
+    }
+    const a = anchorForActivateRef.current
+    if (!a || !onCellActivateRef.current) return
+    const info = cellInfoAt(a)
+    if (info) onCellActivateRef.current(info)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey])
 
   // Visit every distinct (dataIndex, columnId) the selection actually covers,
   // walking each region so non-contiguous multi-select never spills into the

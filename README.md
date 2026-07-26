@@ -47,6 +47,41 @@ export default function App() {
 - **`react` / `react-dom` 18+** are peer dependencies (bring your own).
 - Import **`@jugaaadi/table/style.css` once** — the component ships its compiled styles, so you don't need Tailwind configured in your app.
 
+### A quick blank N×M sheet
+
+Give `rows` and `cols` instead of `columns`/`data` to drop the user into an empty sheet they fill in (columns `col1…colN`, editable, with **add row / add column** built in):
+
+```tsx
+<SpreadsheetTable rows={4} cols={4} onDataChange={(rows) => console.log(rows)} />
+```
+
+## Props & events
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `columns` | `ColumnDef[]` | Column definitions. Omit for a blank sheet. |
+| `data` | `Row[]` | Initial rows (`Row = Record<string, unknown>`). |
+| `rows`, `cols` | `number` | Blank-sheet size when no `columns`/`data` are given. |
+| `onDataChange` | `(rows) => void` | Fires after any change with **all** current rows — the way to read edits back out. Not fired on initial mount. |
+| `onCellChange` | `(rowIndex, columnId, value) => void` | Fires **per cell** whose value changes (typing, fill, paste, clear, undo/redo). |
+| `onColumnChange` | `(columns: ColumnInfo[]) => void` | Fires when columns change (add/remove/rename/retype/reorder/hide). |
+| `onSelectionChange` | `(scope: SelectionScope) => void` | Fires when the selection changes (`kind` + row indices + column ids). |
+| `onCellActivate` | `(info: CellEventInfo) => void` | Fires when a cell becomes active **by click or keyboard** — ideal for triggering an animation elsewhere in your app. |
+| `onCellClick` | `(info, event) => void` | Cell click, with the native `MouseEvent`. |
+| `onCellKeyDown` | `(info, event) => void` | Key pressed while a cell is active, with the native `KeyboardEvent`. |
+
+`CellEventInfo` is `{ rowIndex, columnId, value }`; `ColumnInfo` is `{ id, header, type? }`. Types are exported alongside the component.
+
+```tsx
+// e.g. run an animation in your own component when a cell is clicked / focused
+<SpreadsheetTable
+  columns={columns}
+  data={data}
+  onCellActivate={({ rowIndex, columnId }) => myAnimation.trigger(rowIndex, columnId)}
+  onDataChange={(rows) => save(rows)}
+/>
+```
+
 ---
 
 ## Features
