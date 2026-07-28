@@ -1,6 +1,6 @@
 {
   "name": "@jugaaadi/table",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "A world-class, spreadsheet-style data table for React built on TanStack Table v8 — editable cells, formulas, rich column types, borders/formatting, find & replace, shareable views, and a build-your-own blank sheet.",
   "license": "MIT",
   "author": "Mateen Khan",
