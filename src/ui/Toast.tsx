@@ -2,6 +2,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Tooltip } from './Tooltip';
+import { usePartClass } from '../theme';
 import { AnimatePresence, motion } from 'framer-motion';
 import { CheckCircle2, AlertTriangle, Info, X, Copy, Check, ChevronDown, ArrowRight } from 'lucide-react';
 
@@ -104,6 +105,8 @@ function ToastRow({ t, onDismiss }: { t: Toast; onDismiss: (id: number) => void 
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [paused, setPaused] = useState(false);
+  // Consumer theming: `data-jt="toast"` + optional classNames.toast.
+  const partClass = usePartClass('toast');
 
   // Auto-hide, longer for errors/details; pause while hovered so it can be read/copied.
   useEffect(() => {
@@ -134,7 +137,8 @@ function ToastRow({ t, onDismiss }: { t: Toast; onDismiss: (id: number) => void 
       // cannot subscribe to a node that arrives carrying its own aria-live. `aria-atomic`
       // stays here so the row is read as one unit rather than piecemeal.
       aria-atomic="true"
-      className={`pointer-events-auto w-full sm:w-auto sm:min-w-[320px] sm:max-w-md bg-white border ${s.ring} rounded-xl shadow-lg shadow-slate-500/15 overflow-hidden flex`}
+      data-jt="toast"
+      className={`pointer-events-auto w-full sm:w-auto sm:min-w-[320px] sm:max-w-md bg-white border ${s.ring} rounded-xl shadow-lg shadow-slate-500/15 overflow-hidden flex ${partClass}`}
     >
       <div className={`w-1 shrink-0 ${s.bar}`} />
       <div className="flex-1 min-w-0">

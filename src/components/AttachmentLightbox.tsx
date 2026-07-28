@@ -1,18 +1,23 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
+import { usePartClass } from '../theme'
 
 type Props = {
   src: string
   name: string
+  // What to render in the preview. 'image' (default) keeps the old behaviour;
+  // 'video' / 'audio' render native players. Anything else falls back to image.
+  kind?: 'image' | 'video' | 'audio'
   onClose: () => void
 }
 
 // Full-size preview. Portalled to <body> so the scrolling `.table-region`
 // cannot clip it, and every layout-critical rule is inline because the Twind
 // shim is not dependable for position / z-index / transform.
-export function AttachmentLightbox({ src, name, onClose }: Props) {
+export function AttachmentLightbox({ src, name, kind = 'image', onClose }: Props) {
   const [broken, setBroken] = React.useState(false)
   const closeRef = React.useRef<HTMLButtonElement>(null)
+  const partClass = usePartClass('lightbox')
 
   React.useEffect(() => {
     setBroken(false)
@@ -66,6 +71,8 @@ export function AttachmentLightbox({ src, name, onClose }: Props) {
       onMouseUp={swallow}
       onClick={swallow}
       onDoubleClick={swallow}
+      data-jt="lightbox"
+      className={partClass}
       style={{
         position: 'fixed',
         top: 0,
@@ -116,8 +123,29 @@ export function AttachmentLightbox({ src, name, onClose }: Props) {
             padding: '1rem',
           }}
         >
-          This image could not be loaded.
+          This {kind} could not be loaded.
         </div>
+      ) : kind === 'video' ? (
+        <video
+          src={src}
+          controls
+          autoPlay
+          onError={() => setBroken(true)}
+          className="rounded-lg bg-black"
+          style={{
+            maxWidth: '92vw',
+            maxHeight: '80vh',
+            boxShadow: '0 1.25rem 3rem rgba(0,0,0,0.55)',
+          }}
+        />
+      ) : kind === 'audio' ? (
+        <audio
+          src={src}
+          controls
+          autoPlay
+          onError={() => setBroken(true)}
+          style={{ width: 'min(90vw, 28rem)' }}
+        />
       ) : (
         <img
           src={src}

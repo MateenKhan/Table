@@ -27,6 +27,12 @@ export type TypeOptions = {
   suffix?: string
   // `file` / `image`: the file picker's `accept` attribute.
   accept?: string
+  // `file` / `image`: max accepted upload size in BYTES for this column. When a
+  // dropped/picked/pasted file exceeds it the size-limit flow runs (see
+  // `onFileSizeLimitExceeded` / the agree-reject popup). Undefined = no limit;
+  // there is deliberately no built-in default. Overrides the grid-wide
+  // `maxFileSize` prop for this column.
+  maxFileSize?: number
   // `date` / `datetime`: a date-fns format string. Defaults to 'yyyy-MM-dd'
   // for `date` and 'yyyy-MM-dd HH:mm' for `datetime`.
   dateFormat?: string

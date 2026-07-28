@@ -277,6 +277,48 @@ class ColumnTypeRegistry {
     return { ...preset, options: { ...preset.options } }
   }
 
+  /**
+   * Merge imported custom presets in by id (the clone path). Non-destructive:
+   * existing customs are kept, incoming ones with the same id overwrite, new ids
+   * are added — so a view that referenced a custom unit still resolves after an
+   * import, without wiping the user's own units. Built-in ids are ignored.
+   */
+  restoreCustoms(presets: readonly unknown[]): void {
+    this.ensureLoaded()
+    let changed = false
+    for (const raw of presets) {
+      const value = raw as Record<string, unknown>
+      if (!value || typeof value.id !== 'string') continue
+      if (BUILTIN_PRESETS.some((p) => p.id === value.id)) continue
+      const options = (value.options ?? {}) as Record<string, unknown>
+      const preset: ColumnTypePreset = {
+        id: value.id,
+        label:
+          typeof value.label === 'string' && value.label.trim()
+            ? value.label.trim().slice(0, MAX_LABEL)
+            : value.id,
+        group: 'Custom',
+        type: 'decimal',
+        options: {
+          type: 'decimal',
+          suffix:
+            typeof options.suffix === 'string'
+              ? options.suffix.slice(0, MAX_SYMBOL)
+              : '',
+          decimals:
+            typeof options.decimals === 'number' &&
+            Number.isFinite(options.decimals)
+              ? Math.min(6, Math.max(0, Math.trunc(options.decimals)))
+              : 2,
+        },
+        builtin: false,
+      }
+      this.customs.set(preset.id, preset)
+      changed = true
+    }
+    if (changed) this.notify()
+  }
+
   /** Remove a custom preset. Built-in ids are ignored. Returns whether it went. */
   removeCustom(id: string): boolean {
     this.ensureLoaded()

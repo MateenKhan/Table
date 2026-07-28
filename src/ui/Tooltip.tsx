@@ -1,6 +1,7 @@
 // VENDORED VERBATIM FROM the shared UI (pages/tasks/components/Tooltip.tsx — do NOT diverge; at import into the shared UI, delete src/ui/ and repoint to the originals.
 import { useState, useRef, useCallback, useLayoutEffect, isValidElement, cloneElement, type ReactNode, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
+import { usePartClass } from '../theme';
 
 /**
  * Project-wide custom tooltip. Portal-rendered to <body> so it never clips inside
@@ -84,6 +85,8 @@ export function Tooltip({
   const tipRef = useRef<HTMLDivElement>(null);
   /** Horizontal nudge applied AFTER measuring, see the layout effect below. */
   const [dx, setDx] = useState(0);
+  // Consumer theming: `data-jt="tooltip"` + an optional classNames.tooltip.
+  const partClass = usePartClass('tooltip');
 
   // Clamping the ANCHOR is not enough, and this was a real bug: the bubble is centre-anchored
   // (`translate(-50%)`), so a 131px-wide "Toggle Console (Ctrl+J)" on the IDE's 12px-wide left
@@ -154,13 +157,14 @@ export function Tooltip({
         <div
           ref={tipRef}
           data-side={pos.side}
+          data-jt="tooltip"
           style={{
             position: 'fixed',
             left: pos.x + dx,
             top: pos.side === 'top' ? pos.y - 8 : pos.y + 8,
             transform: pos.side === 'top' ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
           }}
-          className={`z-[200] pointer-events-none px-2 py-1 rounded-lg bg-slate-900 text-white text-2xs font-semibold shadow-lg ${wide ? 'max-w-[18rem] whitespace-normal leading-relaxed text-left' : 'whitespace-nowrap'}`}
+          className={`z-[200] pointer-events-none px-2 py-1 rounded-lg bg-slate-900 text-white text-2xs font-semibold shadow-lg ${wide ? 'max-w-[18rem] whitespace-normal leading-relaxed text-left' : 'whitespace-nowrap'} ${partClass}`}
           role="tooltip"
         >
           {label}

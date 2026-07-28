@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { AlertTriangle, HelpCircle } from 'lucide-react';
+import { usePartClass } from '../theme';
 
 export type ConfirmTone = 'danger' | 'default';
 
@@ -35,6 +36,8 @@ interface ConfirmDialogProps {
 export function ConfirmDialog({ isOpen, title, message, details, confirmLabel = 'Delete', cancelLabel = 'Cancel', tone = 'danger', requireType, onConfirm, onCancel }: ConfirmDialogProps) {
   const [typed, setTyped] = useState('');
   const locked = !!requireType && typed.trim() !== requireType;
+  // Consumer theming: `data-jt="popup"` + optional classNames.popup.
+  const popupClass = usePartClass('popup');
 
   useEffect(() => { if (isOpen) setTyped(''); }, [isOpen, requireType]);
 
@@ -59,6 +62,7 @@ export function ConfirmDialog({ isOpen, title, message, details, confirmLabel = 
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       data-feature-id="tasks-confirm-dialog"
+      data-jt="popup-overlay"
       className="fixed inset-0 z-[1500] flex items-end sm:items-center justify-center bg-slate-900/30 backdrop-blur-sm"
       onClick={onCancel}
     >
@@ -68,7 +72,8 @@ export function ConfirmDialog({ isOpen, title, message, details, confirmLabel = 
         exit={{ y: 80, opacity: 0 }}
         transition={{ type: 'spring', damping: 28, stiffness: 350 }}
         onClick={(e) => e.stopPropagation()}
-        className="w-full sm:w-auto sm:min-w-[360px] sm:max-w-sm bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:pb-6 shadow-2xl shadow-slate-500/30"
+        data-jt="popup"
+        className={`w-full sm:w-auto sm:min-w-[360px] sm:max-w-sm bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:pb-6 shadow-2xl shadow-slate-500/30 ${popupClass}`}
       >
         {/* Grab handle (mobile affordance) */}
         <div className="sm:hidden w-10 h-1 bg-slate-300 rounded-full mx-auto mb-4" />

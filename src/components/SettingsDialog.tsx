@@ -2,6 +2,7 @@ import React from 'react'
 import {
   Check,
   Download,
+  FileArchive,
   FileJson,
   FileUp,
   Link2,
@@ -34,9 +35,12 @@ import {
   AppSnapshot,
   downloadSnapshotJson,
   downloadShareHtml,
+  downloadZipExport,
+  embedSnapshotAttachments,
   getAppUrl,
   parseSnapshotFile,
   parseShareHtml,
+  parseZipImport,
 } from '../snapshot'
 import { Modal, useConfirm, useToast } from '../ui'
 import { Tooltip } from '../ui/Tooltip'
@@ -63,6 +67,8 @@ export type SettingsDialogProps = {
   buildSnapshot: () => AppSnapshot
   /** Load an imported snapshot back into the app. */
   onImportSnapshot: (s: AppSnapshot) => void
+  /** Max bytes per attachment inline-embedded on export (undefined = no cap). */
+  exportEmbedLimit?: number
   /** The query currently in the builder — subject of "save current query". */
   currentQuery: unknown
   /** Apply a saved query back into the builder. */
@@ -787,31 +793,81 @@ function SavedQueriesTab({
 function ExportShareTab({
   buildSnapshot,
   onImportSnapshot,
+  exportEmbedLimit,
   onClose,
 }: {
   buildSnapshot: () => AppSnapshot
   onImportSnapshot: (s: AppSnapshot) => void
+  exportEmbedLimit?: number
   onClose: () => void
 }) {
   const toast = useToast()
   const fileRef = React.useRef<HTMLInputElement>(null)
   const appUrl = getAppUrl()
+  const [busy, setBusy] = React.useState(false)
 
-  const exportJson = () => {
+  // Uploaded media lives in session-scoped blob: URLs; embed it as data: URLs so
+  // the exported file carries its images/videos/files to any machine. A note is
+  // shown when some attachments were too big to inline (see exportEmbedLimit).
+  const embeddedSnapshot = async () => {
+    const { snapshot, embedded, referenced } = await embedSnapshotAttachments(
+      buildSnapshot(),
+      exportEmbedLimit,
+    )
+    return { snapshot, embedded, referenced }
+  }
+
+  const embedNote = (embedded: number, referenced: number) => {
+    const parts: string[] = []
+    if (embedded) parts.push(`${embedded} media file(s) embedded`)
+    if (referenced)
+      parts.push(`${referenced} too large to embed — kept as reference`)
+    return parts.join(' · ') || undefined
+  }
+
+  const exportJson = async () => {
+    setBusy(true)
     try {
-      downloadSnapshotJson(buildSnapshot())
-      toast.success('View exported', 'Saved as a .json file')
+      const { snapshot, embedded, referenced } = await embeddedSnapshot()
+      downloadSnapshotJson(snapshot)
+      toast.success('View exported', embedNote(embedded, referenced) ?? 'Saved as a .json file')
     } catch (err) {
       toast.fromError('Export failed', err)
+    } finally {
+      setBusy(false)
     }
   }
 
-  const exportHtml = () => {
+  const exportHtml = async () => {
+    setBusy(true)
     try {
-      downloadShareHtml(buildSnapshot(), appUrl)
-      toast.success('Shareable page created', 'Saved as a .html file')
+      const { snapshot, embedded, referenced } = await embeddedSnapshot()
+      downloadShareHtml(snapshot, appUrl)
+      toast.success(
+        'Shareable page created',
+        embedNote(embedded, referenced) ?? 'Saved as a .html file',
+      )
     } catch (err) {
       toast.fromError('Could not create share page', err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // The media-friendly path: real files in a folder, referenced by name from
+  // view.json. `buildSnapshot()` is used as-is — the zip builder pulls the bytes
+  // and rewrites each attachment to an archive path itself.
+  const exportZip = async () => {
+    setBusy(true)
+    try {
+      const { bundled, missing } = await downloadZipExport(buildSnapshot())
+      const parts = [`${bundled} media file(s) bundled`]
+      if (missing) parts.push(`${missing} unavailable`)
+      toast.success('View exported', parts.join(' · '))
+    } catch (err) {
+      toast.fromError('Export failed', err)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -821,18 +877,32 @@ function ExportShareTab({
     // Reset immediately so re-picking the same file fires change again.
     input.value = ''
     if (!file) return
+    setBusy(true)
     try {
-      const text = await file.text()
-      const isHtml =
-        file.name.toLowerCase().endsWith('.html') ||
-        /^\s*<!doctype html/i.test(text)
-      const snapshot = isHtml ? parseShareHtml(text) : parseSnapshotFile(text)
+      const lower = file.name.toLowerCase()
+      // A .zip bundle carries its media as real files; read it as bytes and let
+      // parseZipImport rehydrate the attachments from `files/`.
+      const isZip = lower.endsWith('.zip') || file.type === 'application/zip'
+      let snapshot: AppSnapshot | null
+      let kind: 'zip' | 'html' | 'json'
+      if (isZip) {
+        kind = 'zip'
+        snapshot = parseZipImport(new Uint8Array(await file.arrayBuffer()))
+      } else {
+        const text = await file.text()
+        const isHtml =
+          lower.endsWith('.html') || /^\s*<!doctype html/i.test(text)
+        kind = isHtml ? 'html' : 'json'
+        snapshot = isHtml ? parseShareHtml(text) : parseSnapshotFile(text)
+      }
       if (!snapshot) {
         toast.error(
           'Could not import',
-          isHtml
-            ? "This .html file doesn't contain a shareable view."
-            : 'This file is not a valid exported view.',
+          kind === 'zip'
+            ? "This .zip doesn't contain a view.json bundle."
+            : kind === 'html'
+              ? "This .html file doesn't contain a shareable view."
+              : 'This file is not a valid exported view.',
         )
         return
       }
@@ -841,6 +911,8 @@ function ExportShareTab({
       onClose()
     } catch (err) {
       toast.fromError('Import failed', err)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -856,13 +928,42 @@ function ExportShareTab({
               Export view + data (.json)
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              A complete, lossless copy — the rows, formulas, formatting, column
-              types, layout and merges. The reliable path, any size.
+              A complete, lossless copy — rows, formulas, formatting (colors,
+              fonts, borders, alignment), column types, layout and merges. Media
+              is inlined as base64. One self-contained file, any size.
             </p>
           </div>
-          <button type="button" className="btn-primary-sm shrink-0" onClick={exportJson}>
+          <button
+            type="button"
+            className="btn-primary-sm shrink-0"
+            onClick={exportJson}
+            disabled={busy}
+          >
             <Download size={14} />
-            Export .json
+            {busy ? 'Exporting…' : 'Export .json'}
+          </button>
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-white p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
+              <FileArchive size={16} className="text-slate-500 shrink-0" />
+              Export view + media (.zip)
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Best for images, video and files: a <code>view.json</code> plus a{' '}
+              <code>files/</code> folder of the actual media, linked by name.
+              Re-import the whole <code>.zip</code> to restore everything.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn-ghost-sm shrink-0"
+            onClick={exportZip}
+            disabled={busy}
+          >
+            <FileArchive size={14} />
+            {busy ? 'Bundling…' : 'Export .zip'}
           </button>
         </div>
 
@@ -882,9 +983,14 @@ function ExportShareTab({
               someone. Best-effort for reasonably sized views.
             </p>
           </div>
-          <button type="button" className="btn-ghost-sm shrink-0" onClick={exportHtml}>
+          <button
+            type="button"
+            className="btn-ghost-sm shrink-0"
+            onClick={exportHtml}
+            disabled={busy}
+          >
             <Share2 size={14} />
-            Create .html
+            {busy ? 'Working…' : 'Create .html'}
           </button>
         </div>
       </section>
@@ -898,8 +1004,10 @@ function ExportShareTab({
               Import a view…
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              Load a previously exported <code className="text-slate-600">.json</code>{' '}
-              (or a shared <code className="text-slate-600">.html</code> page). This
+              Load a previously exported{' '}
+              <code className="text-slate-600">.json</code>,{' '}
+              <code className="text-slate-600">.zip</code> (with its media), or a
+              shared <code className="text-slate-600">.html</code> page. This
               replaces the current view with the imported one.
             </p>
           </div>
@@ -907,22 +1015,24 @@ function ExportShareTab({
             type="button"
             className="btn-ghost-sm shrink-0"
             onClick={() => fileRef.current?.click()}
+            disabled={busy}
           >
             <Upload size={14} />
-            Choose file…
+            {busy ? 'Reading…' : 'Choose file…'}
           </button>
           <input
             ref={fileRef}
             type="file"
-            accept=".json,.html"
+            accept=".json,.html,.zip"
             className="hidden"
             onChange={onPickFile}
           />
         </div>
         <p className="text-2xs text-slate-500">
-          Note: uploaded images kept as temporary <code>blob:</code> links are
-          session-scoped and won't survive an export; data-URL or text values
-          carry over fine.
+          Media round-trips both ways: a <code>.zip</code> keeps it as real files
+          in a <code>files/</code> folder linked by name; a <code>.json</code>/
+          <code>.html</code> inlines it as <code>data:</code> URLs (large files
+          above <code>exportEmbedLimit</code> are kept as references).
         </p>
       </section>
     </div>
@@ -936,6 +1046,7 @@ export function SettingsDialog({
   onClose,
   buildSnapshot,
   onImportSnapshot,
+  exportEmbedLimit,
   currentQuery,
   onLoadQuery,
 }: SettingsDialogProps) {
@@ -1002,6 +1113,7 @@ export function SettingsDialog({
             <ExportShareTab
               buildSnapshot={buildSnapshot}
               onImportSnapshot={onImportSnapshot}
+              exportEmbedLimit={exportEmbedLimit}
               onClose={onClose}
             />
           )}

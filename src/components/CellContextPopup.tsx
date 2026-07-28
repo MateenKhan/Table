@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { Column, RowData, Table } from '@tanstack/react-table'
 import type { LucideIcon } from 'lucide-react'
 import {
+  ArrowDownToLine,
   ArrowDownWideNarrow,
   ArrowLeftToLine,
   ArrowRightToLine,
@@ -132,8 +133,11 @@ type Props<T extends RowData> = {
   onInsertColumnLeft?: () => void
   onInsertColumnRight?: () => void
   onDeleteColumn?: () => void
-  // Row-target only: remove the row entirely (Clear now lives beside the Danger
-  // group, not on the strip). Rendered in the Format group when wired.
+  // Row-target only: insert a blank row above / below this one, or remove it
+  // entirely (Clear now lives beside the Danger group, not on the strip). Each
+  // renders in the Format group when wired.
+  onInsertRowAbove?: () => void
+  onInsertRowBelow?: () => void
   onDeleteRow?: () => void
   // Format controls: available font-size presets and font-family options. Each
   // renders a compact select inside the Format box only when its array is
@@ -417,6 +421,8 @@ export function CellContextStrip<T extends RowData>({
   onInsertColumnLeft,
   onInsertColumnRight,
   onDeleteColumn,
+  onInsertRowAbove,
+  onInsertRowBelow,
   onDeleteRow,
   fontSizes,
   fontFamilies,
@@ -472,6 +478,8 @@ export function CellContextStrip<T extends RowData>({
     !!onPromoteToHeader ||
     !!onToggleRowPin ||
     !!onSetRowHeight ||
+    !!onInsertRowAbove ||
+    !!onInsertRowBelow ||
     !!onDeleteRow
 
   // ONE captioned group. The always-present format controls lead; the column /
@@ -843,6 +851,28 @@ export function CellContextStrip<T extends RowData>({
           </StripMenu>
         ) : null}
 
+        {onInsertRowAbove ? (
+          <button
+            type="button"
+            className="icon-btn-sm text-teal-600"
+            title="Insert row above"
+            aria-label="Insert row above"
+            onClick={onInsertRowAbove}
+          >
+            <ArrowUpToLine size={16} />
+          </button>
+        ) : null}
+        {onInsertRowBelow ? (
+          <button
+            type="button"
+            className="icon-btn-sm text-teal-600"
+            title="Insert row below"
+            aria-label="Insert row below"
+            onClick={onInsertRowBelow}
+          >
+            <ArrowDownToLine size={16} />
+          </button>
+        ) : null}
         {onDeleteRow ? (
           <button
             type="button"

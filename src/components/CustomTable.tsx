@@ -220,8 +220,15 @@ type Props<T extends RowData> = {
   onPromoteRowToHeader?: (dataRowIndex: number) => void
   onInsertColumn?: (columnId: string, side: 'left' | 'right') => void
   onDeleteColumn?: (columnId: string) => void
+  // Insert a blank row above / below a single selected row.
+  onInsertRow?: (dataRowIndex: number, side: 'above' | 'below') => void
   // Remove a single selected row entirely (distinct from clearing its contents).
   onDeleteRow?: (dataRowIndex: number) => void
+  // Per-row heights (keyed by data-row index). Controlled: when both are wired
+  // the parent owns the map (so it can be exported/cloned); otherwise the table
+  // keeps them in local state as before.
+  rowHeights?: Record<number, number>
+  onRowHeightsChange?: (next: Record<number, number>) => void
   // Font presets threaded into the contextual strip's FORMAT cluster: the size
   // options and the family options. Passed to every strip so any selection can
   // set them.
@@ -245,7 +252,10 @@ export function CustomTable<T extends RowData>({
   onPromoteRowToHeader,
   onInsertColumn,
   onDeleteColumn,
+  onInsertRow,
   onDeleteRow,
+  rowHeights: controlledRowHeights,
+  onRowHeightsChange,
   fontSizes,
   fontFamilies,
   onMergeColumns,
@@ -421,7 +431,36 @@ export function CustomTable<T extends RowData>({
   const ROW_MIN_HEIGHT = 24
   const ROW_MAX_HEIGHT = 480
 
-  const [rowHeights, setRowHeights] = React.useState<Record<number, number>>({})
+  // Controlled when the parent wires both props (so heights can be exported /
+  // cloned); otherwise the table owns them locally, unchanged from before. The
+  // `setRowHeights` wrapper accepts the same value|updater shape either way, so
+  // every existing call site keeps working.
+  const [internalRowHeights, setInternalRowHeights] = React.useState<
+    Record<number, number>
+  >({})
+  const isControlledHeights =
+    controlledRowHeights !== undefined && onRowHeightsChange !== undefined
+  const rowHeights = isControlledHeights
+    ? controlledRowHeights
+    : internalRowHeights
+  const setRowHeights = React.useCallback(
+    (
+      updater:
+        | Record<number, number>
+        | ((prev: Record<number, number>) => Record<number, number>),
+    ) => {
+      if (isControlledHeights) {
+        const next =
+          typeof updater === 'function'
+            ? updater(controlledRowHeights as Record<number, number>)
+            : updater
+        onRowHeightsChange!(next)
+      } else {
+        setInternalRowHeights(updater)
+      }
+    },
+    [isControlledHeights, controlledRowHeights, onRowHeightsChange],
+  )
 
   // ── Row drag-to-reorder ─────────────────────────────────────────────────────
   // Reordering the underlying array only lines up with what the user sees when
@@ -1038,6 +1077,12 @@ export function CustomTable<T extends RowData>({
             onPromoteRowToHeader
               ? () => onPromoteRowToHeader(dataRowIndex)
               : undefined
+          }
+          onInsertRowAbove={
+            onInsertRow ? () => onInsertRow(dataRowIndex, 'above') : undefined
+          }
+          onInsertRowBelow={
+            onInsertRow ? () => onInsertRow(dataRowIndex, 'below') : undefined
           }
           onDeleteRow={
             onDeleteRow ? () => onDeleteRow(dataRowIndex) : undefined

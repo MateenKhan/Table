@@ -1,17 +1,28 @@
 import { CellContext, RowData } from '@tanstack/react-table'
+import { UploadCloud } from 'lucide-react'
 import React from 'react'
 import {
   Attachment,
   createAttachment,
+  fileForAttachment,
   fileIconFor,
   formatFileSize,
   initialsOf,
   isAttachment,
+  isAudioAttachment,
   isImageAttachment,
+  isVideoAttachment,
   releaseAttachment,
 } from '../attachments'
+import {
+  resolveMaxFileSize,
+  useAttachmentConfig,
+  type UploadCellInfo,
+} from '../attachmentConfig'
+import { resolveColumnMeta } from '../columnTypeOverrides'
 import { useThumbnailMetrics } from '../thumbnailSize'
 import { useCellSelection } from '../useCellSelection'
+import { useConfirm } from '../ui'
 import { TableMeta } from '../tableModels'
 import AttachmentLightbox from './AttachmentLightbox'
 import FileDropzone from './FileDropzone'
@@ -25,13 +36,31 @@ export function AttachmentCell<T extends RowData>({
   column,
   table,
 }: CellContext<T, unknown>) {
-  const options = column.columnDef.meta
+  // Effective options = base meta + any runtime type override, so a column
+  // retyped to file/image (or given a maxFileSize) at runtime is respected.
+  const options = resolveColumnMeta(column.id, column.columnDef.meta)
   const isImageColumn = options?.type === 'image'
   const metrics = useThumbnailMetrics()
   const selection = useCellSelection()
+  const config = useAttachmentConfig()
+  const confirm = useConfirm()
 
   const raw = getValue()
   const value = isAttachment(raw) ? raw : null
+
+  // Which player the lightbox should use for the current value.
+  const previewKind: 'image' | 'video' | 'audio' | null = !value
+    ? null
+    : isVideoAttachment(value)
+      ? 'video'
+      : isAudioAttachment(value)
+        ? 'audio'
+        : isImageColumn || isImageAttachment(value)
+          ? 'image'
+          : null
+
+  // The cell this renderer is for, handed to every low-level upload event.
+  const cellInfo: UploadCellInfo = { rowIndex: row.index, columnId: column.id }
 
   const [isBroken, setIsBroken] = React.useState(false)
   const [isPreviewOpen, setIsPreviewOpen] = React.useState(false)
@@ -46,10 +75,10 @@ export function AttachmentCell<T extends RowData>({
   }, [value?.url])
 
   const isActive = selection?.activeKey === `${row.id}::${column.id}`
-  // Whether this cell has something the lightbox can show (an image value, or an
-  // image column with any value). Computed up front so the keyboard-preview
-  // effect below can read it through a ref regardless of which branch renders.
-  const canPreview = !!value && (isImageColumn || isImageAttachment(value))
+  // Whether this cell has something the lightbox can show (image, video or
+  // audio). Computed up front so the keyboard-preview effect below can read it
+  // through a ref regardless of which branch renders.
+  const canPreview = previewKind !== null
 
   // Keyboard preview: pressing Enter on the active attachment cell bumps the
   // selection layer's `previewNonce`; the active, previewable cell opens its
@@ -79,10 +108,35 @@ export function AttachmentCell<T extends RowData>({
     meta.updateData(row.index, column.id, next)
   }
 
-  const takeFile = (file: File | null | undefined) => {
+  // The effective size cap: per-column meta wins over the grid-wide prop, and
+  // `undefined` means no limit (there is no built-in default).
+  const limit = resolveMaxFileSize(options?.maxFileSize, config.maxFileSize)
+
+  // Decide whether an over-limit file may be kept. A consumer
+  // `onFileSizeLimitExceeded` handler wins (it may return a Promise so it can
+  // show its own UI); otherwise the built-in, themeable agree/reject popup runs.
+  const passesSizeGate = async (file: File): Promise<boolean> => {
+    if (typeof limit !== 'number' || file.size <= limit) return true
+    const info = { file, limit, rowIndex: row.index, columnId: column.id }
+    if (config.onFileSizeLimitExceeded) {
+      return !!(await config.onFileSizeLimitExceeded(info))
+    }
+    return confirm({
+      tone: 'default',
+      title: 'File is larger than allowed',
+      message: `“${file.name}” is ${formatFileSize(file.size)}, over the ${formatFileSize(
+        limit,
+      )} limit for this column. Add it anyway?`,
+      confirmLabel: 'Add anyway',
+      cancelLabel: 'Reject',
+    })
+  }
+
+  const takeFile = async (file: File | null | undefined) => {
     if (!file) return
     // An image column only ever accepts images, however the file arrived.
     if (isImageColumn && !file.type.startsWith('image/')) return
+    if (!(await passesSizeGate(file))) return
     store(createAttachment(file))
   }
 
@@ -90,7 +144,31 @@ export function AttachmentCell<T extends RowData>({
   // hold a single attachment, so only the first is stored. It flows through the
   // same `createAttachment` -> `store` path as paste, so object-URL ownership
   // and revocation stay identical to before.
-  const handleFiles = (files: File[]) => takeFile(files[0])
+  const handleFiles = (files: File[]) => {
+    void takeFile(files[0])
+  }
+
+  // Fire a low-level upload event, if the consumer wired one for this kind.
+  const uploadEvents = {
+    onClick: (e: React.MouseEvent) => config.onUploadClick?.(e, cellInfo),
+    onKeyDown: (e: React.KeyboardEvent) => config.onUploadKeyDown?.(e, cellInfo),
+    onMouseDown: (e: React.MouseEvent) =>
+      config.onUploadMouseDown?.(e, cellInfo),
+    onMouseUp: (e: React.MouseEvent) => config.onUploadMouseUp?.(e, cellInfo),
+    onDrop: (e: React.DragEvent) => config.onUploadDrop?.(e, cellInfo),
+  }
+
+  // The upload-to-server button only exists when a consumer wired the hook.
+  const emitUploadToServer = (event: React.MouseEvent) => {
+    event.stopPropagation()
+    if (!value) return
+    config.onUploadToServer?.({
+      attachment: value,
+      file: fileForAttachment(value),
+      rowIndex: row.index,
+      columnId: column.id,
+    })
+  }
 
   const accept = options?.accept ?? (isImageColumn ? 'image/*' : undefined)
 
@@ -125,6 +203,11 @@ export function AttachmentCell<T extends RowData>({
         overlayLabel={isImageColumn ? 'Drop image' : 'Drop file'}
         className="flex items-center justify-center gap-1 rounded-lg border border-dashed border-slate-300 text-xs text-slate-500 cursor-pointer select-none transition-colors sm:hover:border-slate-400"
         style={{ minHeight: metrics.thumb }}
+        onRootClick={uploadEvents.onClick}
+        onRootKeyDown={uploadEvents.onKeyDown}
+        onRootMouseDown={uploadEvents.onMouseDown}
+        onRootMouseUp={uploadEvents.onMouseUp}
+        onDropEvent={uploadEvents.onDrop}
       >
         {({ isDragActive }) =>
           isDragActive
@@ -148,6 +231,7 @@ export function AttachmentCell<T extends RowData>({
     'rounded-lg border border-slate-300 bg-white text-2xs leading-none px-1 py-0.5 cursor-pointer transition-colors active:scale-[0.97]'
   const replaceBtnClass = `${actionBtn} text-slate-500 sm:hover:bg-slate-50`
   const removeBtnClass = `${actionBtn} text-rose-600 sm:hover:bg-rose-50`
+  const uploadBtnClass = `${actionBtn} inline-flex items-center justify-center text-sky-600 sm:hover:bg-sky-50`
 
   const renderActions = (open: () => void) => (
     <div
@@ -170,6 +254,19 @@ export function AttachmentCell<T extends RowData>({
       >
         ↻
       </button>
+      {/* Upload-to-server: only present when the consumer wired the hook. The
+          grid carries NO networking — clicking just emits onUploadToServer. */}
+      {config.onUploadToServer ? (
+        <button
+          type="button"
+          title="Upload to server"
+          aria-label="Upload attachment to server"
+          onClick={emitUploadToServer}
+          className={uploadBtnClass}
+        >
+          <UploadCloud size={12} strokeWidth={2} />
+        </button>
+      ) : null}
       <button
         type="button"
         title="Remove"
@@ -222,6 +319,26 @@ export function AttachmentCell<T extends RowData>({
         }}
       />
     )
+  ) : canPreview ? (
+    // Playable media (video / audio) in a `file` column: the chip opens the
+    // lightbox player on click rather than downloading.
+    <button
+      type="button"
+      title={`Play ${value.name}`}
+      onClick={(event) => {
+        event.stopPropagation()
+        setIsPreviewOpen(true)
+      }}
+      className="flex items-center gap-1 min-w-0 flex-1 text-slate-900 bg-transparent cursor-zoom-in text-left"
+    >
+      <span className="text-base flex-none">{fileIconFor(value)}</span>
+      <span className="truncate text-xs">{value.name}</span>
+      {metrics.thumb >= 40 && value.size ? (
+        <span className="text-2xs text-slate-500 flex-none">
+          {formatFileSize(value.size)}
+        </span>
+      ) : null}
+    </button>
   ) : (
     <a
       href={value.url}
@@ -249,15 +366,21 @@ export function AttachmentCell<T extends RowData>({
       noClick
       overlayLabel={showsImage ? 'Drop to replace' : 'Drop file'}
       className="flex items-center gap-1 min-w-0"
+      onRootClick={uploadEvents.onClick}
+      onRootKeyDown={uploadEvents.onKeyDown}
+      onRootMouseDown={uploadEvents.onMouseDown}
+      onRootMouseUp={uploadEvents.onMouseUp}
+      onDropEvent={uploadEvents.onDrop}
     >
       {({ open }) => (
         <>
           {thumbnail}
           {renderActions(open)}
-          {isPreviewOpen && showsImage ? (
+          {isPreviewOpen && previewKind ? (
             <AttachmentLightbox
               src={value.url}
               name={value.name}
+              kind={previewKind}
               onClose={closePreview}
             />
           ) : null}

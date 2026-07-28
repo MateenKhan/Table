@@ -12,6 +12,7 @@ import {
   getPaginationRowModel,
   getSortedRowModel,
   GroupingState,
+  SortingState,
   useReactTable,
 } from '@tanstack/react-table'
 import React from 'react'
@@ -22,9 +23,15 @@ import {
   columns as baseColumns,
   defaultColumn,
   getTableMeta,
+  selectColumn,
   READ_ONLY_COLUMNS,
   SKIP_COLUMNS,
 } from './tableModels'
+import {
+  serializeColumns,
+  rebuildColumns,
+  type ColumnSchemaNode,
+} from './columnSchema'
 import {
   buildMergedColumns,
   collectColumnIds,
@@ -51,7 +58,10 @@ import {
   FONT_SIZE_OPTIONS,
   FONT_FAMILY_OPTIONS,
 } from './formatting'
-import { useColumnTypeRegistryVersion } from './columnTypeRegistry'
+import {
+  useColumnTypeRegistryVersion,
+  columnTypeRegistry,
+} from './columnTypeRegistry'
 import CustomFunctionsDropdown, {
   loadStoredFunctions,
 } from './components/CustomFunctionsDropdown'
@@ -82,7 +92,12 @@ import SettingsDialog from './components/SettingsDialog'
 import { readSharedSnapshotFromUrl, type AppSnapshot } from './snapshot'
 import { HelpCircle, Replace, Settings } from 'lucide-react'
 import ThumbnailSizeProvider, { ThumbnailSize } from './thumbnailSize'
-import { releaseAllAttachments } from './attachments'
+import { releaseAllAttachments, collectAttachmentUrls } from './attachments'
+import {
+  AttachmentConfigProvider,
+  type AttachmentConfig,
+} from './attachmentConfig'
+import { usePartClass } from './theme'
 import { blankColumns, blankRow, blankRows } from './blankSheet'
 import {
   loadCustomSheet,
@@ -156,7 +171,19 @@ type AppProps = {
   // (1, 2, 3…) click, with the column id / data-row index and the native event.
   onColumnHeaderClick?: (columnId: string, event: React.MouseEvent) => void
   onRowHeaderClick?: (rowIndex: number, event: React.MouseEvent) => void
+  // ── Attachments / uploads (file + image columns) ──────────────────────────
+  // The full attachment config (size limit, size-limit handler, upload-to-server
+  // hook, and low-level upload events). Threaded to every attachment cell.
+  attachmentConfig?: AttachmentConfig
+  // Max bytes per file inline-embedded into an exported snapshot. Larger files
+  // export as references (they need re-uploading on another machine). Undefined
+  // = embed everything regardless of size.
+  exportEmbedLimit?: number
 }
+
+// Stable identity so an embed that passes no attachment config never re-renders
+// the provider needlessly.
+const EMPTY_ATTACHMENT_CONFIG: AttachmentConfig = {}
 
 export const App = ({
   columns: columnsProp,
@@ -174,7 +201,13 @@ export const App = ({
   onCellKeyDown,
   onColumnHeaderClick,
   onRowHeaderClick,
+  attachmentConfig,
+  exportEmbedLimit,
 }: AppProps = {}) => {
+  // Consumer theming hook for the whole-app root surface.
+  const rootPartClass = usePartClass('root')
+  // Stable identity for the (usually empty) attachment config.
+  const resolvedAttachmentConfig = attachmentConfig ?? EMPTY_ATTACHMENT_CONFIG
   const generateDemoRows = makeDemoData ?? ((): Person[] => [])
   // Which vertical the URL selected (null = default; never in library mode).
   const activeVertical = React.useMemo(
@@ -289,6 +322,8 @@ export const App = ({
     // schema + data (this is the "bring the data back" action).
     if (standalone) clearCustomSheet()
     setCustomColumns(null)
+    setImportedColumns(null)
+    setRowHeights({})
     // Regenerate from the active profiles when a vertical is loaded, else the
     // demo's random data — or, in a library embed, the caller's initial rows.
     setData(
@@ -319,6 +354,8 @@ export const App = ({
     // (if any) is discarded — including its saved copy.
     clearCustomSheet()
     setCustomColumns(null)
+    setImportedColumns(null)
+    setRowHeights({})
     // A vertical with nothing selected shows an empty sheet rather than the
     // random demo data — the demo only belongs to the default (no-vertical) site.
     setData(
@@ -358,6 +395,9 @@ export const App = ({
   )
   const [globalFilter, setGlobalFilter] =
     React.useState<GlobalSearchValue>(emptyGlobalSearch)
+  // Per-row heights (data-row index → px), lifted here so a resized row is part
+  // of the exported/cloned view. CustomTable drives it as a controlled prop.
+  const [rowHeights, setRowHeights] = React.useState<Record<number, number>>({})
 
   // A user-authored schema. `null` means "use the built-in schema" (the demo /
   // profile columns); once the user wipes the table with Delete-all they get a
@@ -373,6 +413,16 @@ export const App = ({
       : null
   })
   const isCustomSchema = customColumns !== null
+
+  // A full schema rebuilt from an imported snapshot's `columnSchema`. This is the
+  // "clone" channel: when set it becomes the table's columns wholesale, so an
+  // import reproduces the exported table's structure (groups, headers, types,
+  // order) — not just its data mapped onto whatever columns the host had. Unlike
+  // `customColumns` it does NOT flip the app into blank-sheet mode (thumbnails,
+  // per-column edit UI stay normal). `null` → no import in effect.
+  const [importedColumns, setImportedColumns] = React.useState<
+    typeof baseColumns | null
+  >(null)
 
   // Persist the user's own sheet (debounced) whenever it changes — but ONLY the
   // custom schema. The demo / profile sheet is intentionally never saved, so a
@@ -406,6 +456,8 @@ export const App = ({
     tableFormatting.restore(null)
     columnTypeOverrides.restore(null)
     setCustomColumns(cols as unknown as typeof baseColumns)
+    setImportedColumns(null)
+    setRowHeights({})
     setData(blankRows(20, ids) as unknown as Person[])
   }, [history])
 
@@ -442,23 +494,24 @@ export const App = ({
   }, [])
 
   // Insert a blank column immediately left / right of the given one.
-  const insertColumn = React.useCallback(
-    (columnId: string, side: 'left' | 'right') => {
-      setCustomColumns((prev) => {
-        if (!prev) return prev
-        const pos = prev.findIndex((c) => String(c.id) === columnId)
-        if (pos < 0) return prev
-        const id = `col${nextBlankColumnId(prev)}`
-        setData((rows) =>
-          rows.map(
-            (r) => ({ ...(r as object), [id]: '' }) as unknown as Person,
-          ),
-        )
-        const at = side === 'left' ? pos : pos + 1
-        return [...prev.slice(0, at), makeBlankColumn(id), ...prev.slice(at)]
+  // Insert one empty row above / below `dataRowIndex`, for any schema. Row
+  // indices shift, so — like row delete / reorder — formulas and the undo
+  // history (both keyed by index) are cleared rather than replayed onto the
+  // wrong rows.
+  const insertRow = React.useCallback(
+    (dataRowIndex: number, side: 'above' | 'below') => {
+      setFormulas({})
+      history.clear()
+      setData((prev) => {
+        const row = (
+          customColumns ? blankRow(customColumns.map((c) => String(c.id))) : {}
+        ) as unknown as Person
+        const at = side === 'above' ? dataRowIndex : dataRowIndex + 1
+        const clamped = Math.max(0, Math.min(at, prev.length))
+        return [...prev.slice(0, clamped), row, ...prev.slice(clamped)]
       })
     },
-    [],
+    [customColumns, history],
   )
 
   // Remove a column from the blank sheet (its type override goes with it).
@@ -649,18 +702,32 @@ export const App = ({
   const [merges, setMerges] = React.useState<ColumnMerge[]>(() =>
     activeVertical || !standalone ? [] : loadStoredMerges(),
   )
-  // `baseColumns` is the default schema; a user's blank sheet, if any, wins over
-  // everything; otherwise a composed profile sheet replaces the default.
-  const effectiveBaseColumns = customColumns
-    ? customColumns
-    : composed
-      ? (composed.columns as unknown as typeof baseColumns)
-      : (columnsProp ?? baseColumns)
+  // `baseColumns` is the default schema. Priority, highest first: an imported
+  // clone schema wins over everything; then a user's blank sheet; then a composed
+  // profile sheet; then the consumer's / built-in columns.
+  const effectiveBaseColumns = importedColumns
+    ? importedColumns
+    : customColumns
+      ? customColumns
+      : composed
+        ? (composed.columns as unknown as typeof baseColumns)
+        : (columnsProp ?? baseColumns)
   const columns = React.useMemo(
     () =>
       applyTypeOverrides(buildMergedColumns(effectiveBaseColumns, merges)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [effectiveBaseColumns, merges, typeOverridesVersion, typeRegistryVersion],
+  )
+
+  // Materialise the current (built-in / consumer) schema into an editable clone,
+  // so a structural edit on a table the user did not author can still stick.
+  const materializeSchema = React.useCallback(
+    () =>
+      rebuildColumns(
+        serializeColumns(effectiveBaseColumns),
+        selectColumn,
+      ) as unknown as typeof baseColumns,
+    [effectiveBaseColumns],
   )
 
   // Merges are plain descriptors, so they survive a reload like custom
@@ -730,6 +797,92 @@ export const App = ({
     debugColumns: true,
   })
 
+  // Resolve every displayed cell value into a plain data array. Columns that
+  // render through an ACCESSOR FUNCTION (e.g. the demo's computed `fullName`)
+  // keep their value only in the table, never in `data` — so a clone/export that
+  // reads by key would show them blank. This folds those computed values back
+  // into the rows by column id, making the data self-contained. Pass-through
+  // (same ref) when there are no computed columns, so the common case is free.
+  const resolveDisplayedData = React.useCallback((): Record<
+    string,
+    unknown
+  >[] => {
+    const rows = data as unknown as Record<string, unknown>[]
+    const computed = table.getAllLeafColumns().filter((col) => {
+      const def = col.columnDef as unknown as Record<string, unknown>
+      return !def.accessorKey && typeof def.accessorFn === 'function'
+    })
+    if (!computed.length) return rows
+    const coreRows = table.getCoreRowModel().rows
+    return rows.map((row, i) => {
+      const tableRow = coreRows[i]
+      if (!tableRow) return row
+      const out: Record<string, unknown> = { ...row }
+      for (const col of computed) {
+        if (!(col.id in out)) {
+          try {
+            out[col.id] = tableRow.getValue(col.id)
+          } catch {
+            /* an accessor that throws just leaves the cell blank */
+          }
+        }
+      }
+      return out
+    })
+  }, [data, table])
+
+  // Insert a blank column immediately left / right of `columnId`, in ANY schema —
+  // flat or grouped, built-in or user-authored. When the schema is not yet
+  // user-owned it is materialised first (so the change persists), then the new
+  // leaf is spliced in as a sibling of the target column wherever it sits in the
+  // group tree. Every row gets the new key so its cells are addressable at once.
+  const insertColumnAt = React.useCallback(
+    (columnId: string, side: 'left' | 'right') => {
+      const newId = `col_${Date.now().toString(36)}${Math.random()
+        .toString(36)
+        .slice(2, 5)}`
+      const newCol = makeBlankColumn(newId)
+      // When we are about to materialise a built-in schema (no user-owned schema
+      // yet), fold computed column values into the rows first so columns like
+      // `fullName` survive the switch to key-based reading.
+      const willMaterialize = !customColumns && !importedColumns
+      const baseRows = willMaterialize
+        ? resolveDisplayedData()
+        : (data as unknown as Record<string, unknown>[])
+      setData(
+        baseRows.map((r) => ({ ...r, [newId]: '' }) as unknown as Person),
+      )
+
+      // Recursively rebuild the tree, inserting `newCol` beside the target leaf.
+      const edit = (defs: typeof baseColumns): typeof baseColumns => {
+        let done = false
+        const walk = (arr: unknown[]): unknown[] => {
+          const out: unknown[] = []
+          for (const raw of arr) {
+            const def = raw as Record<string, unknown>
+            if (!done && Array.isArray(def.columns)) {
+              out.push({ ...def, columns: walk(def.columns) })
+            } else if (!done && String(def.id ?? def.accessorKey) === columnId) {
+              done = true
+              if (side === 'left') out.push(newCol, def)
+              else out.push(def, newCol)
+            } else {
+              out.push(def)
+            }
+          }
+          return out
+        }
+        return walk(defs) as typeof baseColumns
+      }
+
+      if (customColumns) setCustomColumns((prev) => (prev ? edit(prev) : prev))
+      else if (importedColumns)
+        setImportedColumns((prev) => (prev ? edit(prev) : prev))
+      else setImportedColumns(edit(materializeSchema()))
+    },
+    [customColumns, importedColumns, materializeSchema, resolveDisplayedData, data],
+  )
+
   // Surface column-model changes (add / remove / rename / retype / reorder /
   // hide) to a host as a light schema description. Recomputed each render (few
   // columns) and gated on a stable key so the callback only fires on real
@@ -781,7 +934,9 @@ export const App = ({
   const buildSnapshot = React.useCallback(
     (): AppSnapshot => ({
       version: 1,
-      data: data as unknown as Record<string, unknown>[],
+      // Self-contained rows: computed (accessorFn) column values folded in, so an
+      // import reproduces every cell — including columns the source derived.
+      data: resolveDisplayedData(),
       formulas,
       formatting: tableFormatting.snapshot(),
       columnTypes: columnTypeOverrides.snapshot(),
@@ -792,8 +947,31 @@ export const App = ({
         columnPinning,
         columnVisibility,
         rowPinning,
+        // Sort / group / column-filter / selection / page size — the rest of the
+        // view state, so the clone shows the same sorted, grouped, filtered,
+        // paged and selected picture. `sorting` is uncontrolled, so it is read
+        // straight off the table.
+        sorting: table.getState().sorting,
+        grouping,
+        columnFilters,
+        rowSelection,
+        pagination: { pageSize: table.getState().pagination.pageSize },
       },
       merges,
+      // The FULL column tree (groups, headers, types, order, sizes), so an
+      // import can rebuild an identical table rather than dropping the data onto
+      // the host's own columns. Serialised from the pre-merge base schema —
+      // merges are restored separately and re-applied on top.
+      columnSchema: serializeColumns(effectiveBaseColumns),
+      // Per-row heights, so a resized row clones at the same height.
+      ...(Object.keys(rowHeights).length
+        ? { rowHeights: rowHeights as Record<string, number> }
+        : {}),
+      // User-defined formula functions + custom column-type presets the view
+      // depends on, so formulas still evaluate and custom units still resolve on
+      // another machine.
+      customFunctions: customFunctions.toJSON(),
+      customColumnTypes: columnTypeRegistry.list().filter((p) => !p.builtin),
       // A wiped-to-blank sheet ships its generic schema so the shared view keeps
       // the user's headers; the built-in schema is left implicit.
       ...(customColumns
@@ -808,37 +986,88 @@ export const App = ({
       columnPinning,
       columnVisibility,
       rowPinning,
+      grouping,
+      columnFilters,
+      rowSelection,
+      rowHeights,
       merges,
       customColumns,
+      effectiveBaseColumns,
+      resolveDisplayedData,
       table,
     ],
   )
 
   const importSnapshot = React.useCallback(
     (s: AppSnapshot) => {
-      releaseAllAttachments()
+      // Revoke the OLD view's object URLs, but keep any the incoming snapshot
+      // already minted (the .zip import rebuilds its media before we get here —
+      // a blanket revoke would kill exactly those and break every image).
+      releaseAllAttachments(collectAttachmentUrls(s.data ?? []))
       history.clear()
+      // Restore the view's own custom functions + column-type presets FIRST, so
+      // formula recalculation and column-type resolution below see them. Both
+      // merge (non-destructive) rather than replacing the user's local set.
+      if (Array.isArray(s.customFunctions) && s.customFunctions.length) {
+        const merged = new Map<string, unknown>()
+        for (const fn of customFunctions.toJSON()) {
+          merged.set(String((fn as { name?: string }).name ?? '').toLowerCase(), fn)
+        }
+        for (const fn of s.customFunctions) {
+          const name = (fn as { name?: unknown }).name
+          if (typeof name === 'string' && name.trim()) {
+            merged.set(name.toLowerCase(), fn)
+          }
+        }
+        customFunctions.replaceAll([...merged.values()])
+      }
+      if (Array.isArray(s.customColumnTypes) && s.customColumnTypes.length) {
+        columnTypeRegistry.restoreCustoms(s.customColumnTypes)
+      }
       setFormulas((s.formulas ?? {}) as FormulaMap)
       setData((s.data ?? []) as unknown as Person[])
       tableFormatting.restore((s.formatting ?? {}) as never)
       columnTypeOverrides.restore((s.columnTypes ?? {}) as never)
       setGlobalFilter((s.query as GlobalSearchValue) ?? emptyGlobalSearch)
+      setRowHeights((s.rowHeights ?? {}) as Record<number, number>)
       const ts = (s.tableState ?? {}) as {
         columnOrder?: ColumnOrderState
         columnSizing?: Record<string, number>
         columnPinning?: ColumnPinningState
         columnVisibility?: Record<string, boolean>
         rowPinning?: RowPinningState
+        sorting?: SortingState
+        grouping?: GroupingState
+        columnFilters?: ColumnFiltersState
+        rowSelection?: Record<string, boolean>
+        pagination?: { pageSize?: number }
       }
       if (ts.columnOrder) setColumnOrder(ts.columnOrder)
       if (ts.columnPinning) setColumnPinning(ts.columnPinning)
       if (ts.columnVisibility) setColumnVisibility(ts.columnVisibility)
       if (ts.rowPinning) setRowPinning(ts.rowPinning)
       if (ts.columnSizing) table.setColumnSizing(ts.columnSizing)
+      // Sort / group / filter / selection / paging: always SET (even to empty)
+      // so importing a plain view also clears any of these left over from before.
+      table.setSorting(ts.sorting ?? [])
+      setGrouping(ts.grouping ?? [])
+      setColumnFilters(ts.columnFilters ?? [])
+      setRowSelection(ts.rowSelection ?? {})
+      if (ts.pagination?.pageSize) table.setPageSize(ts.pagination.pageSize)
       setMerges((s.merges ?? []) as ColumnMerge[])
-      // Restore a shared blank-sheet schema, or fall back to the built-in one.
+      // The clone: rebuild the exported column tree so the table's structure
+      // (groups, headers, types, order) matches the source exactly, regardless
+      // of what columns the host started with. Newer exports always carry this.
+      const schema = s.columnSchema as ColumnSchemaNode[] | undefined
+      setImportedColumns(
+        schema && schema.length
+          ? (rebuildColumns(schema, selectColumn) as unknown as typeof baseColumns)
+          : null,
+      )
+      // Legacy path: an older export with only a blank-sheet schema and no
+      // columnSchema still restores its generic columns.
       setCustomColumns(
-        Array.isArray(s.customColumns) && s.customColumns.length
+        !schema && Array.isArray(s.customColumns) && s.customColumns.length
           ? (s.customColumns as unknown as typeof baseColumns)
           : null,
       )
@@ -923,7 +1152,12 @@ export const App = ({
   return (
     // One viewport: the toolbar keeps its natural height, the table region takes
     // the rest and scrolls on its own (§8 — only the table scrolls, not the page).
-    <div className="h-screen w-full max-w-full overflow-hidden box-border p-2 sm:p-4 flex flex-col gap-2">
+    // `.jt-root` + `data-jt="root"` are the stable theming hooks for the whole app.
+    <AttachmentConfigProvider config={resolvedAttachmentConfig}>
+    <div
+      data-jt="root"
+      className={`jt-root h-screen w-full max-w-full overflow-hidden box-border p-2 sm:p-4 flex flex-col gap-2 ${rootPartClass}`}
+    >
       <div className="table-region min-w-0 flex-1 min-h-0">
         <ThumbnailSizeProvider size={isCustomSchema ? 'S' : thumbnailSize}>
           <CellSelectionProvider
@@ -1079,9 +1313,12 @@ export const App = ({
                   onPromoteRowToHeader={
                     isCustomSchema ? promoteRowToHeader : undefined
                   }
-                  onInsertColumn={isCustomSchema ? insertColumn : undefined}
+                  onInsertColumn={insertColumnAt}
+                  onInsertRow={insertRow}
                   onDeleteColumn={isCustomSchema ? deleteColumn : undefined}
                   onDeleteRow={(dataRowIndex) => deleteRows([dataRowIndex])}
+                  rowHeights={rowHeights}
+                  onRowHeightsChange={setRowHeights}
                   fontSizes={[...FONT_SIZE_OPTIONS]}
                   fontFamilies={[...FONT_FAMILY_OPTIONS]}
                   onMergeColumns={mergeColumns}
@@ -1108,6 +1345,7 @@ export const App = ({
         onClose={() => setSettingsOpen(false)}
         buildSnapshot={buildSnapshot}
         onImportSnapshot={importSnapshot}
+        exportEmbedLimit={exportEmbedLimit}
         currentQuery={globalFilter}
         onLoadQuery={(value) => {
           setGlobalFilter(value as GlobalSearchValue)
@@ -1115,6 +1353,7 @@ export const App = ({
         }}
       />
     </div>
+    </AttachmentConfigProvider>
   )
 }
 

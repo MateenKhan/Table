@@ -29,6 +29,16 @@ export type FileDropzoneProps = {
   style?: React.CSSProperties
   // Centred hint shown only while a file is dragged over the area.
   overlayLabel?: string
+  // Low-level DOM events forwarded to the drop root, so a consumer can observe
+  // the raw upload interaction (see attachmentConfig / the onUpload* props).
+  // These run ALONGSIDE the dropzone's own behaviour (click-to-open, drop).
+  onRootClick?: (event: React.MouseEvent) => void
+  onRootKeyDown?: (event: React.KeyboardEvent) => void
+  onRootMouseDown?: (event: React.MouseEvent) => void
+  onRootMouseUp?: (event: React.MouseEvent) => void
+  // The native drop event (react-dropzone swallows bubbling, so it is surfaced
+  // here explicitly). Fires after the files are accepted.
+  onDropEvent?: (event: React.DragEvent) => void
 }
 
 // react-dropzone v14 wants accept as Record<mime, ext[]>, not the picker's
@@ -69,6 +79,11 @@ export function FileDropzone({
   title,
   style,
   overlayLabel = 'Drop here',
+  onRootClick,
+  onRootKeyDown,
+  onRootMouseDown,
+  onRootMouseUp,
+  onDropEvent,
 }: FileDropzoneProps) {
   const acceptProp = React.useMemo(() => toAcceptProp(accept), [accept])
 
@@ -83,7 +98,8 @@ export function FileDropzone({
     // Stop drag / drop events at this element so the grid's own <td> handlers do
     // not also react to the same drop (react-dropzone only does this when asked).
     noDragEventsBubbling: true,
-    onDrop: (acceptedFiles) => {
+    onDrop: (acceptedFiles, _rejections, event) => {
+      if (event) onDropEvent?.(event as unknown as React.DragEvent)
       if (acceptedFiles.length) onFiles(acceptedFiles as File[])
     },
   })
@@ -104,6 +120,12 @@ export function FileDropzone({
         className: rootClassName,
         title,
         style,
+        // react-dropzone composes these with its own handlers, so our event
+        // fires alongside click-to-open etc. rather than replacing it.
+        onClick: onRootClick,
+        onKeyDown: onRootKeyDown,
+        onMouseDown: onRootMouseDown,
+        onMouseUp: onRootMouseUp,
       })}
     >
       <input {...getInputProps()} />

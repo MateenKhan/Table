@@ -17,6 +17,11 @@ import EditableCell from './components/EditableCell'
 import AttachmentCell from './components/AttachmentCell'
 // Side-effect import too: this is where ColumnMeta gets augmented.
 import './columnTypes'
+import { isAttachmentType } from './columnTypes'
+import {
+  resolveColumnMeta,
+  useColumnTypeOverridesVersion,
+} from './columnTypeOverrides'
 
 export const fuzzyFilter: FilterFn<Person> = (
   row,
@@ -82,33 +87,55 @@ const attachmentColumn = {
   enableGlobalFilter: false,
 } satisfies Partial<ColumnDef<Person>>
 
+// The default cell renderer dispatches on the column's EFFECTIVE type (base
+// meta + any runtime type override): `file` / `image` columns get the full
+// AttachmentCell (upload, preview, size limits, upload-to-server, events); every
+// other type gets EditableCell. This is what makes a consumer's
+// `meta: { type: 'image' }` column behave like the demo's built-in ones —
+// without the consumer having to wire a `cell` renderer themselves.
+function DefaultCell(props: CellContext<Person, unknown>) {
+  // Re-render (and so re-dispatch) when a column's type changes at runtime.
+  useColumnTypeOverridesVersion()
+  const meta = resolveColumnMeta(props.column.id, props.column.columnDef.meta)
+  return isAttachmentType(meta.type) ? (
+    <AttachmentCell {...props} />
+  ) : (
+    <EditableCell {...props} />
+  )
+}
+
 // Give our default column cell renderer editing superpowers!
 export const defaultColumn: Partial<ColumnDef<Person>> = {
-  cell: (props) => <EditableCell {...props} />,
+  cell: (props) => <DefaultCell {...props} />,
+}
+
+// The row-checkbox column. Exported so a rebuilt-from-schema table (import /
+// clone) can restore the exact same structural column rather than trying to
+// reconstruct its custom header/cell from a serialised descriptor.
+export const selectColumn: ColumnDef<Person> = {
+  id: 'select',
+  header: ({ table }) => (
+    <div className="flex items-center justify-center">
+      <IndeterminateCheckbox
+        checked={table.getIsAllRowsSelected()}
+        indeterminate={table.getIsSomeRowsSelected()}
+        onChange={table.getToggleAllRowsSelectedHandler()}
+      />
+    </div>
+  ),
+  cell: ({ row }) => (
+    <div className="flex items-center justify-center">
+      <IndeterminateCheckbox
+        checked={row.getIsSelected()}
+        indeterminate={row.getIsSomeSelected()}
+        onChange={row.getToggleSelectedHandler()}
+      />
+    </div>
+  ),
 }
 
 export const columns: ColumnDef<Person>[] = [
-  {
-    id: 'select',
-    header: ({ table }) => (
-      <div className="flex items-center justify-center">
-        <IndeterminateCheckbox
-          checked={table.getIsAllRowsSelected()}
-          indeterminate={table.getIsSomeRowsSelected()}
-          onChange={table.getToggleAllRowsSelectedHandler()}
-        />
-      </div>
-    ),
-    cell: ({ row }) => (
-      <div className="flex items-center justify-center">
-        <IndeterminateCheckbox
-          checked={row.getIsSelected()}
-          indeterminate={row.getIsSomeSelected()}
-          onChange={row.getToggleSelectedHandler()}
-        />
-      </div>
-    ),
-  },
+  selectColumn,
   {
     header: 'Name',
     columns: [

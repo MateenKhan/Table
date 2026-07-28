@@ -172,3 +172,94 @@
     background: transparent;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   THEMING API — the public CSS surface consumers style against.
+
+   These rules are deliberately UNLAYERED: unlayered CSS wins over anything in
+   `@layer utilities`, so a `--jt-*` variable (or a `[data-jt]` rule) here beats
+   the component's own Tailwind colour utilities. That is what lets a consumer
+   recolor the whole app — including the portalled tooltip / popup / toast —
+   without touching the library.
+
+   THREE ways to override (see the README "Theming" section for full recipes):
+     1. Recolor  — set a `--jt-*` variable. On `:root` it reaches the portalled
+                   surfaces too (they mount on <body>); on `.jt-root` it scopes
+                   to the grid subtree.
+     2. Restyle  — target a `[data-jt="<part>"]` selector with any CSS.
+     3. Classes  — pass a `classNames={{ part: '…' }}` map (see theme.tsx).
+
+   Variables fall back to the current design tokens, so unset = unchanged.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Brand / focus accent (the existing tier-1 focus colour). */
+  --jt-accent: #ff3b1d;
+  --jt-accent-contrast: #ffffff;
+
+  /* App surface + text (the grid's page + body copy). */
+  --jt-surface: #f1f5f9;
+  --jt-text: #0f172a;
+
+  /* Tooltip bubble. */
+  --jt-tooltip-bg: #0f172a;
+  --jt-tooltip-fg: #ffffff;
+  --jt-tooltip-radius: 0.5rem;
+
+  /* Popups / dialogs (confirm, size-limit agree-reject). */
+  --jt-popup-bg: #ffffff;
+  --jt-popup-fg: #0f172a;
+  --jt-popup-border: #e2e8f0;
+  --jt-popup-radius: 1rem;
+  --jt-overlay: rgba(15, 23, 42, 0.30);
+
+  /* Toasts. */
+  --jt-toast-bg: #ffffff;
+  --jt-toast-fg: #0f172a;
+  --jt-toast-radius: 0.75rem;
+
+  /* Media lightbox backdrop. */
+  --jt-lightbox-overlay: rgba(15, 23, 42, 0.82);
+}
+
+/* Keyboard focus ring follows the accent variable. */
+.jt-root :focus-visible,
+[data-jt] :focus-visible {
+  outline-color: var(--jt-accent);
+}
+
+/* Root surface. `.jt-root` is the stable hook wrapping the whole grid. */
+.jt-root {
+  background: var(--jt-surface);
+  color: var(--jt-text);
+}
+
+/* Tooltip (portalled to <body>; styled by attribute so it is reachable). */
+[data-jt='tooltip'] {
+  background: var(--jt-tooltip-bg);
+  color: var(--jt-tooltip-fg);
+  border-radius: var(--jt-tooltip-radius);
+}
+
+/* Popup / dialog panel + its backdrop. */
+[data-jt='popup'] {
+  background: var(--jt-popup-bg);
+  color: var(--jt-popup-fg);
+  border-color: var(--jt-popup-border);
+  border-radius: var(--jt-popup-radius);
+}
+[data-jt='popup-overlay'] {
+  background: var(--jt-overlay);
+}
+
+/* Toast row. */
+[data-jt='toast'] {
+  background: var(--jt-toast-bg);
+  color: var(--jt-toast-fg);
+  border-radius: var(--jt-toast-radius);
+}
+
+/* Media lightbox backdrop. */
+[data-jt='lightbox'] {
+  background: var(--jt-lightbox-overlay);
+}

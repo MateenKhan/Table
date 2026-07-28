@@ -26,6 +26,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from 'lz-string'
+import { zipSync, unzipSync, strToU8, strFromU8, type Zippable } from 'fflate'
+import {
+  attachmentBytes,
+  attachmentFromBytes,
+  embedAttachment,
+  isAttachment,
+  type Attachment,
+} from './attachments'
+import { isColumnSchema, type ColumnSchemaNode } from './columnSchema'
 
 export type AppSnapshot = {
   version: 1
@@ -34,11 +43,27 @@ export type AppSnapshot = {
   formatting: Record<string, unknown> // tableFormatting.snapshot()
   columnTypes: Record<string, unknown> // columnTypeOverrides.snapshot()
   query: unknown // GlobalSearchValue
-  tableState: unknown // { columnOrder, columnSizing, columnPinning, columnVisibility, rowPinning }
+  // { columnOrder, columnSizing, columnPinning, columnVisibility, rowPinning,
+  //   sorting, grouping, columnFilters, rowSelection, pagination } — the full
+  //   TanStack view state, so an import reproduces sort/group/filter/paging too.
+  tableState: unknown
   merges: unknown[] // ColumnMerge[]
+  // Per-row heights (keyed by data-row index as a string), so a resized row
+  // clones at the same height. Absent → default heights.
+  rowHeights?: Record<string, number>
+  // User-defined formula functions the view's formulas may call, so a clone on
+  // another machine can still evaluate them. Absent → none used.
+  customFunctions?: unknown[] // FunctionDefinition[]
+  // User-defined column-type presets referenced by columnTypes, so a custom unit
+  // survives the clone. Absent → only built-in types used.
+  customColumnTypes?: unknown[] // ColumnTypePreset[]
   // A user's blank-sheet schema (generic `col1..colN` defs), if they wiped the
   // built-in columns with Delete-all. Absent → the built-in / profile schema.
   customColumns?: unknown[] // ColumnDef[]
+  // The FULL column tree (groups, headers, types, order, sizes) as a
+  // serialisable schema — this is what lets an import rebuild an identical table
+  // instead of dropping data onto the host's own columns. Absent in old exports.
+  columnSchema?: ColumnSchemaNode[]
 }
 
 /* ------------------------------------------------------------------ app url */
@@ -87,6 +112,25 @@ function validateSnapshot(input: unknown): AppSnapshot | null {
   const customColumns = Array.isArray(input.customColumns)
     ? input.customColumns
     : undefined
+  const columnSchema = isColumnSchema(input.columnSchema)
+    ? input.columnSchema
+    : undefined
+
+  // Per-row heights: keep only string->finite-number entries.
+  let rowHeights: Record<string, number> | undefined
+  if (isObject(input.rowHeights)) {
+    const cleaned: Record<string, number> = {}
+    for (const [k, v] of Object.entries(input.rowHeights)) {
+      if (typeof v === 'number' && Number.isFinite(v)) cleaned[k] = v
+    }
+    if (Object.keys(cleaned).length) rowHeights = cleaned
+  }
+  const customFunctions = Array.isArray(input.customFunctions)
+    ? input.customFunctions
+    : undefined
+  const customColumnTypes = Array.isArray(input.customColumnTypes)
+    ? input.customColumnTypes
+    : undefined
 
   return {
     version: 1,
@@ -98,6 +142,10 @@ function validateSnapshot(input: unknown): AppSnapshot | null {
     tableState: input.tableState ?? null,
     merges,
     ...(customColumns ? { customColumns } : {}),
+    ...(columnSchema ? { columnSchema } : {}),
+    ...(rowHeights ? { rowHeights } : {}),
+    ...(customFunctions ? { customFunctions } : {}),
+    ...(customColumnTypes ? { customColumnTypes } : {}),
   }
 }
 
@@ -108,6 +156,180 @@ function validateSnapshot(input: unknown): AppSnapshot | null {
 export function parseSnapshotFile(text: string): AppSnapshot | null {
   try {
     return validateSnapshot(JSON.parse(text))
+  } catch {
+    return null
+  }
+}
+
+/* ------------------------------------------------------- embed attachments */
+
+/** Outcome of embedding, so the caller can tell the user what happened. */
+export type EmbedSummary = {
+  snapshot: AppSnapshot
+  // How many attachments were read inline as data: URLs.
+  embedded: number
+  // Left as references (over `embedLimit`, or a dead blob we could not read).
+  referenced: number
+}
+
+/**
+ * Produce an export-safe copy of `snapshot` in which every attachment's bytes
+ * travel WITH the file. Session-scoped `blob:` object URLs are read back into
+ * base64 `data:` URLs so the exported view opens with its media intact on any
+ * machine. Attachments larger than `embedLimit` (bytes) are left as references
+ * to keep the export from ballooning; `undefined` embeds everything regardless
+ * of size (no hard-coded cap). Already-portable `data:` / `http(s):` values are
+ * untouched. The input snapshot is never mutated.
+ */
+export async function embedSnapshotAttachments(
+  snapshot: AppSnapshot,
+  embedLimit?: number,
+): Promise<EmbedSummary> {
+  let embedded = 0
+  let referenced = 0
+
+  const data = await Promise.all(
+    snapshot.data.map(async (row) => {
+      const next: Record<string, unknown> = { ...row }
+      for (const [key, value] of Object.entries(row)) {
+        if (!isAttachment(value)) continue
+        const wasBlob = value.url.startsWith('blob:')
+        const outcome = await embedAttachment(value, embedLimit)
+        next[key] = outcome.attachment
+        // Count only session-scoped blobs we resolved: newly inlined vs. left
+        // as a reference. Already-portable values are neither — nothing to do.
+        if (wasBlob && outcome.kind === 'inline') embedded++
+        else if (wasBlob) referenced++
+      }
+      return next
+    }),
+  )
+
+  return { snapshot: { ...snapshot, data }, embedded, referenced }
+}
+
+/* -------------------------------------------------------------- zip bundle */
+//
+// The .zip export keeps the media OUT of the JSON: every attachment's real bytes
+// are written as a file under `files/<columnId>/<row>-<name>`, and the copy of
+// the attachment in `view.json` references it by that path (`archivePath`). This
+// is the media-friendly counterpart to the base64 `.json` — a folder of real,
+// openable files plus a small, readable manifest — and it round-trips: import
+// reads each `archivePath` back out of the archive and rebuilds a live URL.
+
+// A filesystem-safe path segment.
+const safeSegment = (name: string): string =>
+  (name || 'file').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'file'
+
+// Insert `-n` before the extension to dodge a name already used in the archive.
+const dedupePath = (path: string, used: Set<string>): string => {
+  if (!used.has(path)) return path
+  const dot = path.lastIndexOf('.')
+  const stem = dot > path.lastIndexOf('/') ? path.slice(0, dot) : path
+  const ext = dot > path.lastIndexOf('/') ? path.slice(dot) : ''
+  let n = 1
+  let next = `${stem}-${n}${ext}`
+  while (used.has(next)) next = `${stem}-${++n}${ext}`
+  return next
+}
+
+export type ZipSummary = {
+  blob: Blob
+  // Attachments written as files into the archive.
+  bundled: number
+  // Session blobs whose bytes could not be read (kept as an empty reference).
+  missing: number
+}
+
+/**
+ * Bundle the whole view into a `.zip`: `view.json` (the snapshot, with media
+ * referenced by `archivePath`), a `files/` tree of the actual media, and a short
+ * `README.txt`. Re-import the whole `.zip` to get the media back — see
+ * `parseZipImport`. The input snapshot is never mutated.
+ */
+export async function buildZipExport(snapshot: AppSnapshot): Promise<ZipSummary> {
+  const archive: Zippable = {}
+  const used = new Set<string>()
+  let bundled = 0
+  let missing = 0
+
+  const data = await Promise.all(
+    snapshot.data.map(async (row, rowIndex) => {
+      const next: Record<string, unknown> = { ...row }
+      for (const [key, value] of Object.entries(row)) {
+        if (!isAttachment(value)) continue
+        const bytes = await attachmentBytes(value)
+        if (!bytes) {
+          // A dead session blob: keep the metadata but drop the unusable URL.
+          missing++
+          next[key] = { ...value, url: '', isObjectUrl: false, archivePath: undefined }
+          continue
+        }
+        const path = dedupePath(
+          `files/${safeSegment(key)}/${rowIndex}-${safeSegment(value.name)}`,
+          used,
+        )
+        used.add(path)
+        archive[path] = bytes
+        const ref: Attachment = {
+          name: value.name,
+          mime: value.mime,
+          size: bytes.byteLength,
+          url: path, // human-readable reference; rebuilt on import
+          isObjectUrl: false,
+          archivePath: path,
+        }
+        next[key] = ref
+        bundled++
+      }
+      return next
+    }),
+  )
+
+  const outSnapshot: AppSnapshot = { ...snapshot, data }
+  archive['view.json'] = strToU8(JSON.stringify(outSnapshot, null, 2))
+  archive['README.txt'] = strToU8(
+    [
+      'Exported from @jugaaadi/table.',
+      '',
+      '- view.json  — the full view (rows, formulas, formatting, layout, merges).',
+      '- files/     — the media; each attachment in view.json links here by name.',
+      '',
+      'Re-import the ENTIRE .zip (not view.json alone) to restore the media.',
+    ].join('\n'),
+  )
+
+  const zipped = zipSync(archive, { level: 6 })
+  return {
+    blob: new Blob([zipped as BlobPart], { type: 'application/zip' }),
+    bundled,
+    missing,
+  }
+}
+
+/**
+ * Read a `.zip` produced by `buildZipExport` back into a snapshot: parse
+ * `view.json`, then rebuild every attachment whose `archivePath` points at a
+ * file in the archive (minting live object URLs). Returns null when the bytes
+ * are not a recognisable bundle. Never throws.
+ */
+export function parseZipImport(bytes: Uint8Array): AppSnapshot | null {
+  try {
+    const entries = unzipSync(bytes)
+    const manifest = entries['view.json']
+    if (!manifest) return null
+    const snapshot = validateSnapshot(JSON.parse(strFromU8(manifest)))
+    if (!snapshot) return null
+
+    for (const row of snapshot.data) {
+      for (const [key, value] of Object.entries(row)) {
+        if (!isAttachment(value) || !value.archivePath) continue
+        const fileBytes = entries[value.archivePath]
+        if (!fileBytes) continue
+        row[key] = attachmentFromBytes(fileBytes, value.name, value.mime)
+      }
+    }
+    return snapshot
   } catch {
     return null
   }
@@ -142,6 +364,16 @@ export function downloadSnapshotJson(snapshot: AppSnapshot, filename?: string): 
     type: 'application/json',
   })
   triggerDownload(blob, name)
+}
+
+/** Build the `.zip` bundle and download it. Returns the media-count summary. */
+export async function downloadZipExport(
+  snapshot: AppSnapshot,
+  filename?: string,
+): Promise<Omit<ZipSummary, 'blob'>> {
+  const { blob, bundled, missing } = await buildZipExport(snapshot)
+  triggerDownload(blob, safeBaseName(filename ?? '', 'table-view') + '.zip')
+  return { bundled, missing }
 }
 
 /* --------------------------------------------------------------- share page */
