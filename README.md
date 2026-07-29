@@ -403,9 +403,24 @@ npm run serve      # preview the production build
 
 ## Tech stack
 
-React 18 · TypeScript · Vite 5 · **[TanStack Table v8](https://tanstack.com/table)** ·
+React 18 · TypeScript · Vite 6 · **[TanStack Table v8](https://tanstack.com/table)** ·
 Tailwind CSS · Framer Motion · react-colorful · react-day-picker · react-dropzone ·
-lz-string.
+fflate · lz-string.
+
+## Contributing
+
+Found a bug, or think a feature is genuinely needed? **Feel free to open a pull
+request** on [github.com/MateenKhan/Table](https://github.com/MateenKhan/Table).
+Keep changes focused and include a short description of the use case so it's easy
+to review.
+
+## Disclaimer
+
+This software is provided **"as is", without warranty of any kind**, express or
+implied. You use it at your own risk. The author (**Mateen Khan**) is **not
+responsible or liable for any use of this library, or for any damage, data loss,
+or other loss** arising from its use, in any project or context. It is your
+responsibility to test and validate it for your own needs before relying on it.
 
 ## License
 
