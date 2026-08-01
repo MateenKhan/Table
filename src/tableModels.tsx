@@ -54,6 +54,47 @@ export const fuzzySort: SortingFn<Person> = (rowA, rowB, columnId) => {
   return dir === 0 ? sortingFns.alphanumeric(rowA, rowB, columnId) : dir
 }
 
+/**
+ * Natural order — the ordering a person expects, not the one a byte
+ * comparison gives.
+ *
+ * Lexical sorting puts `item10` before `item2`, and `File 10.txt` before
+ * `File 9.txt`, because it compares character by character. `Intl.Collator`
+ * with `numeric: true` reads digit runs as numbers, so `2 < 10`.
+ *
+ * `sensitivity: 'base'` makes it case- and accent-insensitive, so `apple`,
+ * `Apple` and `Ápple` sort together rather than in three separate blocks.
+ *
+ * Real numbers and dates still compare numerically — the collator is only
+ * reached for values that aren't both numeric.
+ */
+const naturalCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+})
+
+/** Blank-ish values sort last in both directions rather than pretending to be ''. */
+const isBlank = (v: unknown) => v === null || v === undefined || v === ''
+
+export const naturalSort: SortingFn<Person> = (rowA, rowB, columnId) => {
+  const a = rowA.getValue(columnId)
+  const b = rowB.getValue(columnId)
+
+  if (isBlank(a) && isBlank(b)) return 0
+  // Return a fixed sign: TanStack flips the result for descending, and empties
+  // that flip would surface above real data, which reads as broken.
+  if (isBlank(a)) return 1
+  if (isBlank(b)) return -1
+
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime()
+  if (typeof a === 'boolean' && typeof b === 'boolean') {
+    return a === b ? 0 : a ? 1 : -1
+  }
+
+  return naturalCollator.compare(String(a), String(b))
+}
+
 export type CellUpdate = {
   rowIndex: number
   columnId: string
@@ -107,6 +148,11 @@ function DefaultCell(props: CellContext<Person, unknown>) {
 // Give our default column cell renderer editing superpowers!
 export const defaultColumn: Partial<ColumnDef<Person>> = {
   cell: (props) => <DefaultCell {...props} />,
+  // Natural order everywhere unless a column asks for something else — so
+  // `item2` precedes `item10` and `File 9` precedes `File 10`. TanStack's
+  // default would auto-pick `alphanumeric`, which is close but splits on
+  // case and handles blanks differently.
+  sortingFn: naturalSort,
 }
 
 // The row-checkbox column. Exported so a rebuilt-from-schema table (import /

@@ -27,6 +27,7 @@ import {
   useFormatVersion,
 } from '../formatting'
 import { formulaRefs, useFormulaRefsVersion } from '../formulaRefs'
+import { useFindHighlight, findKey } from '../tableFind'
 import CellContextStrip from './CellContextPopup'
 import { Lock, Plus } from 'lucide-react'
 
@@ -271,6 +272,8 @@ export function CustomTable<T extends RowData>({
   // scanned at L or packed tight at S. Only body cells are touched - header
   // heights are unchanged, so the measured sticky offsets below stay valid.
   const metrics = useThumbnailMetrics()
+  // Browser-style find highlight (App owns the query + matches; cells paint).
+  const findHl = useFindHighlight()
   const tableRef = React.useRef<HTMLTableElement>(null)
   // Column drag-and-drop. Everything it does between pick-up and drop is
   // imperative (see useColumnDrag), so a drag never re-renders this component.
@@ -350,6 +353,54 @@ export function CustomTable<T extends RowData>({
     })
   })()
 
+  /**
+   * Click-to-sort, shared by the letter row, the group bands and the leaf
+   * headers so all three behave identically.
+   *
+   * Resolution rules:
+   *  - a leaf header sorts its own column
+   *  - a GROUP band has no values of its own, so it sorts by its first
+   *    sortable leaf — clicking "Name" sorts by whatever column starts it
+   *  - an UNNAMED column sorts nothing. A blank sheet's placeholder headers
+   *    would otherwise reorder rows against a column the user can't identify,
+   *    which looks like data loss rather than a sort.
+   *
+   * Clicking the same target again flips the direction; TanStack's third
+   * state (back to unsorted) is deliberately skipped — two clicks that both
+   * "do nothing visible" is a worse affordance than a toggle.
+   */
+  /**
+   * Does this column carry a header a user could point at?
+   *
+   * A blank-sheet column renders an empty header until it's named. Sorting by
+   * one would silently reorder every row against a column nobody can identify
+   * — indistinguishable from the data scrambling itself. A function header
+   * counts as labelled: it renders *something*.
+   */
+  const hasHeaderLabel = (column: Column<T, unknown>): boolean => {
+    const header = column.columnDef.header
+    if (typeof header === 'string') return header.trim().length > 0
+    return header != null
+  }
+
+  const sortTargetFor = (column: Column<T, unknown>): Column<T, unknown> | null => {
+    const candidates = column.getLeafColumns().length
+      ? (column.getLeafColumns() as Column<T, unknown>[])
+      : [column]
+    return (
+      candidates.find(
+        (c) => c.getCanSort() && !NON_DATA_COLUMN_IDS.includes(c.id) && hasHeaderLabel(c),
+      ) ?? null
+    )
+  }
+
+  const toggleSortFor = (column: Column<T, unknown>) => {
+    const target = sortTargetFor(column)
+    if (!target) return
+    // getIsSorted() is 'asc' | 'desc' | false — ascending first, then flip.
+    target.toggleSorting(target.getIsSorted() === 'asc')
+  }
+
   // "Blank sheet" mode is signalled by App wiring the header-rename handler —
   // it is only passed for the user's custom (renamable) schema.
   const customHeaderMode = !!onRenameColumn
@@ -406,8 +457,11 @@ export function CustomTable<T extends RowData>({
     return style
   }
 
+  // The coordinate letters (A, B, C…) and row numbers (1, 2, 3…): a distinct
+  // header-grey with DARKER, BOLDER text and a heavier border so the grid frame
+  // reads clearly against the alternating body rows.
   const gutterCell =
-    'bg-slate-100 text-slate-500 text-2xs font-semibold text-center border border-slate-200'
+    'bg-slate-200 text-slate-800 text-2xs font-bold text-center border border-slate-400'
 
   // The scroll container doubles as the keyboard focus sink (a tabIndex=0
   // element that can hold DOM focus), so arrow-key navigation has somewhere to
@@ -795,7 +849,7 @@ export function CustomTable<T extends RowData>({
         <td
           className={`${gutterCell} select-none transition-colors ${
             rowSelected
-              ? 'bg-accent-500/20 font-semibold text-accent-700'
+              ? 'bg-accent-100 font-semibold text-accent-700'
               : isFrozen
                 ? 'bg-slate-200'
                 : dataRowIndex >= 0
@@ -911,9 +965,41 @@ export function CustomTable<T extends RowData>({
           // Live highlight: this cell is read by the formula draft being typed.
           const referenced =
             dataRowIndex >= 0 && formulaRefs.has(cell.column.id, dataRowIndex)
-          const cellContent = flexRender(
-            cell.column.columnDef.cell,
-            cell.getContext(),
+          // Find-in-table highlight: 'current' (the stepped-to match) paints
+          // amber, any other 'match' paints yellow. Overrides the cell fill only
+          // while searching.
+          const fk = findKey(cell.row.id, cell.column.id)
+          const findState: 'current' | 'match' | null =
+            findHl.current === fk
+              ? 'current'
+              : findHl.matches.has(fk)
+                ? 'match'
+                : null
+          /*
+           * A grouped cell is a heading, not a value.
+           *
+           * It needs three things the plain renderer cannot give it: something
+           * to click, a count so the group states its own size, and a triangle
+           * that says which way it will go. Without them a grouped sheet is a
+           * list of headings with the data sealed inside — the rows exist in
+           * the model and there is no way to reach them.
+           */
+          const cellContent = cell.getIsGrouped() ? (
+            <button
+              type="button"
+              className="jt-group-toggle"
+              aria-expanded={cell.row.getIsExpanded()}
+              onClick={cell.row.getToggleExpandedHandler()}
+              title={cell.row.getIsExpanded() ? 'Collapse this group' : 'Expand this group'}
+            >
+              <span className="jt-group-caret" aria-hidden="true">
+                {cell.row.getIsExpanded() ? '▾' : '▸'}
+              </span>
+              {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              <span className="jt-group-count">{cell.row.subRows.length}</span>
+            </button>
+          ) : cell.getIsAggregated() ? null : cell.getIsPlaceholder() ? null : (
+            flexRender(cell.column.columnDef.cell, cell.getContext())
           )
 
           // Base structural style, then — for a frozen row — lift the cell to
@@ -932,8 +1018,13 @@ export function CustomTable<T extends RowData>({
             <td
               key={cell.id}
               data-col-id={cell.column.id}
+              data-find-key={findState ? fk : undefined}
               className={`border border-slate-200 px-2 text-slate-700 ${
-                isFrozen ? 'bg-slate-50' : 'bg-white'
+                isFrozen
+                  ? 'bg-slate-100'
+                  : rowIndex % 2 === 1
+                    ? 'bg-slate-50'
+                    : 'bg-white'
               }`}
               style={{
                 ...cellStyle,
@@ -945,6 +1036,12 @@ export function CustomTable<T extends RowData>({
                   alignmentFor(cell.column.columnDef.meta?.type),
                 ...(fmt.bg ? { backgroundColor: fmt.bg } : {}),
                 ...(fmt.fg ? { color: fmt.fg } : {}),
+                // Find highlight wins over the cell fill while searching.
+                ...(findState === 'current'
+                  ? { backgroundColor: '#fb923c', color: '#0f172a' }
+                  : findState === 'match'
+                    ? { backgroundColor: '#fde68a', color: '#0f172a' }
+                    : {}),
                 ...(fmt.fontSize ? { fontSize: fmt.fontSize } : {}),
                 ...(fmt.fontFamily ? { fontFamily: fmt.fontFamily } : {}),
                 // The frozen/scrolling boundary hairline. Placed before the
@@ -1230,7 +1327,7 @@ export function CustomTable<T extends RowData>({
                   title={isSelectCol ? 'Select all rows' : undefined}
                   className={`${gutterCell} px-1 transition-colors ${
                     colSelected || allRowsSelected
-                      ? 'bg-accent-500/20 font-semibold text-accent-700'
+                      ? 'bg-accent-100 font-semibold text-accent-700'
                       : isData || isSelectCol
                         ? 'cursor-pointer sm:hover:bg-slate-200'
                         : ''
@@ -1238,7 +1335,7 @@ export function CustomTable<T extends RowData>({
                   style={letterCellStyle(col)}
                   onClick={
                     isData
-                      ? (e) =>
+                      ? (e) => {
                           selection?.onColumnHeaderClick(
                             col.id,
                             {
@@ -1247,6 +1344,12 @@ export function CustomTable<T extends RowData>({
                             },
                             e,
                           )
+                          // A modified click is extending a selection, not
+                          // asking for a re-sort.
+                          if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
+                            toggleSortFor(col)
+                          }
+                        }
                       : isSelectCol
                         ? () => table.toggleAllRowsSelected()
                         : undefined
@@ -1309,7 +1412,7 @@ export function CustomTable<T extends RowData>({
           </tr>
           {showNameHeaderRow && table.getHeaderGroups().map((headerGroup, headerRowIndex) => (
             <tr key={headerGroup.id}>
-              {headerGroup.headers.map((header) => {
+              {headerGroup.headers.map((header, hIdx) => {
                 // A placeholder is the empty continuation of a header that
                 // already appeared higher up, so it is never the grab handle.
                 const draggable =
@@ -1342,10 +1445,15 @@ export function CustomTable<T extends RowData>({
                     // measures widths off the header cells.
                     data-col-id={header.column.id}
                     data-header-id={header.id}
-                    className={`border border-slate-200 px-2 py-1.5 text-left align-middle font-semibold transition-colors ${
+                    // Darker, BOLDER header text + a heavier border, and a simple
+                    // per-column alternating grey so columns are easy to tell
+                    // apart. Selection tint (opaque accent) wins over the stripe.
+                    className={`border border-slate-400 px-2 py-1.5 text-left align-middle font-bold transition-colors ${
                       headerSelected
-                        ? 'bg-accent-500/15 text-accent-700'
-                        : 'bg-white text-slate-700'
+                        ? 'bg-accent-100 text-accent-800'
+                        : hIdx % 2 === 1
+                          ? 'bg-slate-100 text-slate-800'
+                          : 'bg-slate-200 text-slate-800'
                     }`}
                     style={{
                       ...shiftedHeaderStyle(
@@ -1426,6 +1534,13 @@ export function CustomTable<T extends RowData>({
                             },
                             event,
                           )
+                          // Plain click also sorts. A group band has no values
+                          // of its own, so toggleSortFor resolves it to its
+                          // first labelled leaf; an unnamed column sorts
+                          // nothing.
+                          if (!event.ctrlKey && !event.metaKey && !event.shiftKey) {
+                            toggleSortFor(header.column as Column<T, unknown>)
+                          }
                         }}
                       >
                         {/* Group / sort are now in the selection ops strip; the
@@ -1464,15 +1579,33 @@ export function CustomTable<T extends RowData>({
                             ⊞
                           </span>
                         ) : null}
-                        {header.column.getIsSorted() ? (
-                          <span
-                            aria-hidden="true"
-                            title={`Sorted ${header.column.getIsSorted()}`}
-                            className="shrink-0 text-xs text-accent-600"
-                          >
-                            {header.column.getIsSorted() === 'asc' ? '▲' : '▼'}
-                          </span>
-                        ) : null}
+                        {(() => {
+                          // A group band is never itself sorted, so show the
+                          // state of the leaf it delegates to — otherwise
+                          // clicking "Name" sorts the grid with no visible
+                          // feedback on the thing you clicked.
+                          const sortedBy = sortTargetFor(
+                            header.column as Column<T, unknown>,
+                          )
+                          const dir = sortedBy?.getIsSorted()
+                          if (!dir) return null
+                          const own = sortedBy?.id === header.column.id
+                          return (
+                            <span
+                              aria-hidden="true"
+                              title={
+                                own
+                                  ? `Sorted ${dir}`
+                                  : `Sorted ${dir} by ${sortedBy?.id}`
+                              }
+                              className={`shrink-0 text-xs ${
+                                own ? 'text-accent-600' : 'text-accent-400'
+                              }`}
+                            >
+                              {dir === 'asc' ? '▲' : '▼'}
+                            </span>
+                          )
+                        })()}
                       </div>
                     )}
                     {/* Resize grip: invisible until hovered, so the column edge

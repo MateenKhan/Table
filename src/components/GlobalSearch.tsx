@@ -587,10 +587,10 @@ export function GlobalSearch<T extends RowData>({
     })
     setDraft({})
     setQuery('')
-    setMessage({
-      tone: 'info',
-      text: `${suggestion.label} — sorted and limited to ${suggestion.n} rows.`,
-    })
+    // No confirmation banner: the chip that just appeared already reads
+    // "Bottom 10 Age ≤ 0 ×". Restating it below the input pushed the table
+    // down and said nothing the user couldn't see.
+    clearMessage()
   }
 
   const commitOption = (option: Option) => {
