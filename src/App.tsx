@@ -8,6 +8,7 @@ import {
   getFacetedRowModel,
   getFacetedUniqueValues,
   getFilteredRowModel,
+  getExpandedRowModel,
   getGroupedRowModel,
   getPaginationRowModel,
   getSortedRowModel,
@@ -53,6 +54,9 @@ import {
   resolveColumnMeta,
   useColumnTypeOverridesVersion,
 } from './columnTypeOverrides'
+import { formatCellValue, isAttachmentType } from './columnTypes'
+import { FindHighlightProvider, findKey, type FindHighlight } from './tableFind'
+import FindBar from './components/FindBar'
 import {
   tableFormatting,
   FONT_SIZE_OPTIONS,
@@ -135,6 +139,9 @@ type AppProps = {
   columns?: typeof baseColumns
   // Consumer initial rows (library embed).
   data?: Person[]
+  // Rows per page. The embed renders no pagination controls, so leaving this
+  // to TanStack's default of 10 makes every row past the tenth unreachable.
+  pageSize?: number
   // true = the standalone demo app (default); false = embedded via the library
   // entry, which gates OFF all app-only machinery: URL/template routing,
   // localStorage persistence, and shared-view-on-load.
@@ -192,6 +199,7 @@ export const App = ({
   makeDemoData,
   rows: rowsProp,
   cols: colsProp,
+  pageSize: pageSizeProp,
   onDataChange,
   onCellChange,
   onColumnChange,
@@ -633,6 +641,19 @@ export const App = ({
   // div, so no actions live inside the table.
   const [opsSlot, setOpsSlot] = React.useState<HTMLElement | null>(null)
 
+  // Browser-style "find in table" bar (Ctrl+F): highlight matches + step through
+  // them. Distinct from the query builder (`q`, filters rows) and Find & replace
+  // (Ctrl+H, bulk edit).
+  const [findBarOpen, setFindBarOpen] = React.useState(false)
+  const [findText, setFindText] = React.useState('')
+  const [findIndex, setFindIndex] = React.useState(0)
+  const findInputRef = React.useRef<HTMLInputElement>(null)
+  // Refs so the window-level keydown handler (mounted once) can reach the latest
+  // find state / navigator without re-subscribing.
+  const findBarOpenRef = React.useRef(false)
+  findBarOpenRef.current = findBarOpen
+  const gotoMatchRef = React.useRef<(dir: 1 | -1) => void>(() => {})
+
   // Ctrl+H opens Find & replace (unless typing in a field).
   React.useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -651,10 +672,45 @@ export const App = ({
     )
   }, [])
 
-  // `q` (when not typing in a field) opens the Query builder and focuses it.
-  // Capture phase + stopPropagation so it wins over the grid's type-to-edit.
+  // Focus the search / query bar via keyboard:
+  //   • Ctrl/Cmd+F — always, overriding the browser's page-find.
+  //   • `q`        — when a cell (not an input) is focused, so type-to-edit is
+  //                  never hijacked.
+  // Capture phase + stopPropagation so it wins over the grid's own handlers.
   React.useEffect(() => {
+    const focusSearch = () => {
+      requestAnimationFrame(() => {
+        queryRef.current
+          ?.querySelector<HTMLElement>('input, [role="combobox"]')
+          ?.focus()
+      })
+    }
     const onKeyDown = (e: KeyboardEvent) => {
+      // Ctrl/Cmd+F → open the browser-style find-in-table bar (not the browser's
+      // own find). Focus + select its input so an existing query is replaceable.
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.key === 'f' || e.key === 'F')
+      ) {
+        e.preventDefault()
+        e.stopPropagation()
+        setFindBarOpen(true)
+        requestAnimationFrame(() => {
+          findInputRef.current?.focus()
+          findInputRef.current?.select()
+        })
+        return
+      }
+      // F3 / Shift+F3 → next / previous match while the find bar is open.
+      if (e.key === 'F3' && findBarOpenRef.current) {
+        e.preventDefault()
+        e.stopPropagation()
+        gotoMatchRef.current(e.shiftKey ? -1 : 1)
+        return
+      }
+      // `q` with no modifier, only when not already typing in a field.
       if ((e.key !== 'q' && e.key !== 'Q') || e.ctrlKey || e.metaKey || e.altKey)
         return
       const el = document.activeElement as HTMLElement | null
@@ -668,11 +724,7 @@ export const App = ({
         return
       e.preventDefault()
       e.stopPropagation()
-      requestAnimationFrame(() => {
-        queryRef.current
-          ?.querySelector<HTMLElement>('input, [role="combobox"]')
-          ?.focus()
-      })
+      focusSearch()
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
@@ -755,8 +807,35 @@ export const App = ({
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
+    /*
+     * Without this, pagination sits at TanStack's default of ten rows a page.
+     * The standalone app has a pager in its toolbar so that is merely a page
+     * size; the library embed renders no pager at all, so it was a hard cap
+     * that dropped every row past the tenth with nothing on screen to say so.
+     * An embed therefore defaults to showing everything it was handed.
+     */
+    initialState: {
+      pagination: {
+        pageIndex: 0,
+        pageSize:
+          pageSizeProp ??
+          (standalone
+            ? 10
+            : Math.max(10, dataProp?.length ?? 0, rowsProp ?? 0)),
+      },
+    },
     getSortedRowModel: getSortedRowModel(),
     getGroupedRowModel: getGroupedRowModel(),
+    /*
+     * Grouping without this produces groups you cannot open.
+     *
+     * TanStack builds the grouped tree from `getGroupedRowModel`, but the rows
+     * underneath a group are only ever emitted by the EXPANDED row model.
+     * Without it, grouping a 37-row sheet by status showed four rows, no
+     * expander and no way back to the data — the grouping toolbar worked and
+     * the feature was useless.
+     */
+    getExpandedRowModel: getExpandedRowModel(),
     getFacetedRowModel: getFacetedRowModel(),
     getFacetedUniqueValues: getFacetedUniqueValues(),
     getFacetedMinMaxValues: getFacetedMinMaxValues(),
@@ -882,6 +961,110 @@ export const App = ({
     },
     [customColumns, importedColumns, materializeSchema, resolveDisplayedData, data],
   )
+
+  // ── Find in table (Ctrl+F) ──────────────────────────────────────────────────
+  // Every cell whose DISPLAYED text contains the query, over the currently
+  // filtered/sorted rows (so it matches what the user sees), across all pages.
+  // Attachment columns are skipped (their value has no meaningful text).
+  const findMatches = React.useMemo(() => {
+    const needle = findText.trim().toLowerCase()
+    const out: { rowId: string; columnId: string; pos: number }[] = []
+    if (!needle) return out
+    const rows = table.getFilteredRowModel().rows
+    const leaf = table
+      .getVisibleLeafColumns()
+      .filter(
+        (col) =>
+          !SKIP_COLUMNS.includes(col.id) &&
+          !isAttachmentType(
+            resolveColumnMeta(col.id, col.columnDef.meta as never).type,
+          ),
+      )
+    for (let pos = 0; pos < rows.length; pos++) {
+      const row = rows[pos]
+      for (const col of leaf) {
+        const raw = row.getValue(col.id)
+        const meta = resolveColumnMeta(col.id, col.columnDef.meta as never)
+        let shown = ''
+        try {
+          shown = formatCellValue(raw, meta)
+        } catch {
+          shown = ''
+        }
+        if (!shown) shown = raw == null ? '' : String(raw)
+        if (shown.toLowerCase().includes(needle)) {
+          out.push({ rowId: row.id, columnId: col.id, pos })
+        }
+      }
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findText, data, globalFilter, columnFilters, columns, typeOverridesVersion])
+
+  // A fresh query starts at the first match.
+  React.useEffect(() => {
+    setFindIndex(0)
+  }, [findText])
+
+  const gotoMatch = React.useCallback(
+    (dir: 1 | -1) => {
+      setFindIndex((i) =>
+        findMatches.length ? (i + dir + findMatches.length) % findMatches.length : 0,
+      )
+    },
+    [findMatches.length],
+  )
+  gotoMatchRef.current = gotoMatch
+
+  const closeFind = React.useCallback(() => {
+    setFindBarOpen(false)
+    setFindText('')
+    setFindIndex(0)
+  }, [])
+
+  const onFindInputKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'F3') {
+        e.preventDefault()
+        gotoMatch(e.shiftKey ? -1 : 1)
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        gotoMatch(-1)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        closeFind()
+      }
+    },
+    [gotoMatch, closeFind],
+  )
+
+  // The highlight the cells read (only while the bar is open).
+  const findHighlight = React.useMemo<FindHighlight>(() => {
+    if (!findBarOpen || !findMatches.length) {
+      return { matches: new Set<string>(), current: null }
+    }
+    const matches = new Set(findMatches.map((m) => findKey(m.rowId, m.columnId)))
+    const cur = findMatches[Math.min(findIndex, findMatches.length - 1)]
+    return { matches, current: cur ? findKey(cur.rowId, cur.columnId) : null }
+  }, [findBarOpen, findMatches, findIndex])
+
+  // Step to a match → jump to its page and scroll the cell into view.
+  React.useEffect(() => {
+    if (!findBarOpen) return
+    const m = findMatches[findIndex]
+    if (!m) return
+    const state = table.getState().pagination
+    const size = state.pageSize || 1
+    const page = Math.floor(m.pos / size)
+    if (state.pageIndex !== page) table.setPageIndex(page)
+    requestAnimationFrame(() => {
+      const key = findKey(m.rowId, m.columnId).replace(/"/g, '\\"')
+      document
+        .querySelector(`[data-find-key="${key}"]`)
+        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findIndex, findBarOpen, findMatches])
 
   // Surface column-model changes (add / remove / rename / retype / reorder /
   // hide) to a host as a light schema description. Recomputed each render (few
@@ -1154,10 +1337,24 @@ export const App = ({
     // the rest and scrolls on its own (§8 — only the table scrolls, not the page).
     // `.jt-root` + `data-jt="root"` are the stable theming hooks for the whole app.
     <AttachmentConfigProvider config={resolvedAttachmentConfig}>
+    <FindHighlightProvider value={findHighlight}>
     <div
       data-jt="root"
       className={`jt-root h-screen w-full max-w-full overflow-hidden box-border p-2 sm:p-4 flex flex-col gap-2 ${rootPartClass}`}
     >
+      {findBarOpen ? (
+        <FindBar
+          query={findText}
+          onQueryChange={setFindText}
+          current={findMatches.length ? Math.min(findIndex, findMatches.length - 1) + 1 : 0}
+          total={findMatches.length}
+          onNext={() => gotoMatch(1)}
+          onPrev={() => gotoMatch(-1)}
+          onClose={closeFind}
+          inputRef={findInputRef}
+          onInputKeyDown={onFindInputKeyDown}
+        />
+      ) : null}
       <div className="table-region min-w-0 flex-1 min-h-0">
         <ThumbnailSizeProvider size={isCustomSchema ? 'S' : thumbnailSize}>
           <CellSelectionProvider
@@ -1353,6 +1550,7 @@ export const App = ({
         }}
       />
     </div>
+    </FindHighlightProvider>
     </AttachmentConfigProvider>
   )
 }

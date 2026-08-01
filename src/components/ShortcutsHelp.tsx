@@ -70,6 +70,9 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
   {
     title: 'Other',
     items: [
+      { keys: ['Ctrl', 'F'], label: 'Focus the search / query bar' },
+      { keys: ['q'], label: 'Focus the search (when a cell is selected)' },
+      { keys: ['Ctrl', 'H'], label: 'Find & replace' },
       { keys: ['Ctrl', 'Z'], label: 'Undo' },
       { keys: ['Ctrl', 'Y'], label: 'Redo' },
       { keys: ['?'], label: 'Show this shortcuts help' },

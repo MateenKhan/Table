@@ -35,6 +35,10 @@ export type SpreadsheetTableProps = {
   // columns and `rows` empty rows the user fills in. e.g. rows={4} cols={4}.
   rows?: number
   cols?: number
+  // How many rows a page shows. Defaults to every row you passed, because an
+  // embedded sheet renders no pagination controls — TanStack's own default of
+  // 10 silently hid everything past row 10 with no way to reach it.
+  pageSize?: number
   // Called after any edit (typing, fill, paste, clear, delete or row reorder)
   // with the full, current rows — the way to read the user's changes back out.
   // Not called for the initial `data`.
@@ -115,6 +119,7 @@ export function SpreadsheetTable({
   data,
   rows,
   cols,
+  pageSize,
   onDataChange,
   onCellChange,
   onColumnChange,
@@ -170,6 +175,7 @@ export function SpreadsheetTable({
               data={data as never}
               rows={rows}
               cols={cols}
+              pageSize={pageSize}
               standalone={false}
               onDataChange={onDataChange as never}
               onCellChange={onCellChange}
