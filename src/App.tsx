@@ -710,17 +710,16 @@ export const App = ({
         gotoMatchRef.current(e.shiftKey ? -1 : 1)
         return
       }
-      // `q` with no modifier, only when not already typing in a field.
-      if ((e.key !== 'q' && e.key !== 'Q') || e.ctrlKey || e.metaKey || e.altKey)
-        return
-      const el = document.activeElement as HTMLElement | null
-      const tag = el?.tagName
-      if (
-        tag === 'INPUT' ||
-        tag === 'TEXTAREA' ||
-        tag === 'SELECT' ||
-        el?.isContentEditable
-      )
+      // Ctrl+Q → focus the search.
+      //
+      // This was a bare `q`, guarded by "not already in an input". That guard
+      // is not enough in a grid: selecting a cell and typing is how you edit,
+      // so the FIRST character lands while focus is still on the grid, not an
+      // input. Every value starting with q — quantity, qty, Q1 — lost its
+      // first keystroke to the search box.
+      //
+      // Ctrl, never Cmd: ⌘Q quits the application on macOS.
+      if ((e.key !== 'q' && e.key !== 'Q') || !e.ctrlKey || e.metaKey || e.altKey)
         return
       e.preventDefault()
       e.stopPropagation()

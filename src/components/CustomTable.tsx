@@ -282,12 +282,6 @@ export function CustomTable<T extends RowData>({
   // tell a plain click (select the whole column) from the tail of a drag
   // (reorder — no selection). Shared across headers: only one is ever active.
   const headerClickStart = React.useRef<{ x: number; y: number } | null>(null)
-  // Inline header rename ("blank sheet"). The column id currently being renamed,
-  // plus its draft text. Only ever one header edits at a time; null = none.
-  const [renamingColumnId, setRenamingColumnId] = React.useState<string | null>(
-    null,
-  )
-  const [renameDraft, setRenameDraft] = React.useState('')
   const theadRef = React.useRef<HTMLTableSectionElement>(null)
   const [headerRowTops, setHeaderRowTops] = React.useState<number[]>([])
   // The full height of the header block (letter row + every grouped header row).
@@ -365,9 +359,9 @@ export function CustomTable<T extends RowData>({
    *    would otherwise reorder rows against a column the user can't identify,
    *    which looks like data loss rather than a sort.
    *
-   * Clicking the same target again flips the direction; TanStack's third
-   * state (back to unsorted) is deliberately skipped — two clicks that both
-   * "do nothing visible" is a worse affordance than a toggle.
+   * Three states, cycling: unsorted → ascending → descending → unsorted.
+   * Getting back to the original row order matters — without it the only way
+   * to undo a sort is to reload.
    */
   /**
    * Does this column carry a header a user could point at?
@@ -394,11 +388,32 @@ export function CustomTable<T extends RowData>({
     )
   }
 
+  // The column that just changed sort, held briefly so the header can flash.
+  // Purely cosmetic: a sort can reorder hundreds of rows off-screen, and
+  // without a cue the only thing that visibly changed is a small glyph.
+  const [justSortedId, setJustSortedId] = React.useState<string | null>(null)
+  const justSortedTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  React.useEffect(
+    () => () => {
+      if (justSortedTimer.current) clearTimeout(justSortedTimer.current)
+    },
+    [],
+  )
+
   const toggleSortFor = (column: Column<T, unknown>) => {
     const target = sortTargetFor(column)
     if (!target) return
-    // getIsSorted() is 'asc' | 'desc' | false — ascending first, then flip.
-    target.toggleSorting(target.getIsSorted() === 'asc')
+
+    // getIsSorted() is 'asc' | 'desc' | false.
+    const dir = target.getIsSorted()
+    if (!dir) target.toggleSorting(false) // → ascending
+    else if (dir === 'asc') target.toggleSorting(true) // → descending
+    else target.clearSorting() // → back to the original order
+
+    setJustSortedId(column.id)
+    if (justSortedTimer.current) clearTimeout(justSortedTimer.current)
+    justSortedTimer.current = setTimeout(() => setJustSortedId(null), 650)
   }
 
   // "Blank sheet" mode is signalled by App wiring the header-rename handler —
@@ -1218,14 +1233,6 @@ export function CustomTable<T extends RowData>({
     }
   }
 
-  // Commit the in-progress header rename: fall back to the current name when the
-  // draft is blank, then leave edit mode. Escape cancels via `cancelRename`.
-  const commitRename = (columnId: string, currentName: string) => {
-    onRenameColumn?.(columnId, renameDraft.trim() || currentName)
-    setRenamingColumnId(null)
-  }
-  const cancelRename = () => setRenamingColumnId(null)
-
   // Full width of the body grid in column-slots: the row-number gutter (1) + one
   // per visible leaf column + the trailing add-column slot when it exists. Drives
   // the add-row bar's colSpan so it spans the whole table.
@@ -1280,7 +1287,13 @@ export function CustomTable<T extends RowData>({
         // line survives even when fractional zoom / low DPR rounds one side away
         // (the "missing borders on mobile" bug). The applied-border overlay is
         // absolute, so it is unaffected by the collapse-mode change.
-        className="border-separate border-spacing-0 text-sm text-slate-700"
+        //
+        // `table-fixed` makes the widths we already set from `column.getSize()`
+        // authoritative. Under the default `auto` layout the browser re-measures
+        // content on every render, so sorting — which changes *which* rows are
+        // visible — silently resized every column and the grid jumped under the
+        // cursor.
+        className="table-fixed border-separate border-spacing-0 text-sm text-slate-700"
       >
         <thead ref={theadRef}>
           {/* Coordinate-letter row + the corner "select all" cell. */}
@@ -1335,7 +1348,7 @@ export function CustomTable<T extends RowData>({
                   style={letterCellStyle(col)}
                   onClick={
                     isData
-                      ? (e) => {
+                      ? (e) =>
                           selection?.onColumnHeaderClick(
                             col.id,
                             {
@@ -1344,12 +1357,6 @@ export function CustomTable<T extends RowData>({
                             },
                             e,
                           )
-                          // A modified click is extending a selection, not
-                          // asking for a re-sort.
-                          if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
-                            toggleSortFor(col)
-                          }
-                        }
                       : isSelectCol
                         ? () => table.toggleAllRowsSelected()
                         : undefined
@@ -1428,7 +1435,6 @@ export function CustomTable<T extends RowData>({
                   !header.isPlaceholder &&
                   header.column.columns.length === 0 &&
                   typeof headerLabel === 'string'
-                const isRenaming = renamingColumnId === header.column.id
 
                 // Highlight the header when its column (or, for a group header,
                 // any column beneath it) is selected.
@@ -1472,37 +1478,7 @@ export function CustomTable<T extends RowData>({
                         : undefined
                     }
                   >
-                    {header.isPlaceholder ? null : isRenaming ? (
-                      // Inline rename editor. Seeded with the current header text
-                      // and selected-all; Enter / blur commit, Escape cancels.
-                      // Pointer events are stopped so clicking / dragging inside
-                      // the field never starts a column drag or a select.
-                      <input
-                        className="input-sm"
-                        autoFocus
-                        value={renameDraft}
-                        onFocus={(event) => event.currentTarget.select()}
-                        onChange={(event) => setRenameDraft(event.target.value)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') {
-                            event.preventDefault()
-                            commitRename(
-                              header.column.id,
-                              headerLabel as string,
-                            )
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault()
-                            cancelRename()
-                          }
-                        }}
-                        onBlur={() =>
-                          commitRename(header.column.id, headerLabel as string)
-                        }
-                      />
-                    ) : (
+                    {header.isPlaceholder ? null : (
                       <div
                         className="flex items-center gap-1"
                         // A plain click on the header selects the whole column
@@ -1526,6 +1502,9 @@ export function CustomTable<T extends RowData>({
                               Math.abs(event.clientY - start.y) > 4
                             if (moved) return
                           }
+                          // Selection only. Sorting lives on its own control
+                          // (the ⇅ button below) so selecting a column can
+                          // never reorder rows you were only trying to look at.
                           selection?.onColumnHeaderClick(
                             header.column.id,
                             {
@@ -1534,42 +1513,69 @@ export function CustomTable<T extends RowData>({
                             },
                             event,
                           )
-                          // Plain click also sorts. A group band has no values
-                          // of its own, so toggleSortFor resolves it to its
-                          // first labelled leaf; an unnamed column sorts
-                          // nothing.
-                          if (!event.ctrlKey && !event.metaKey && !event.shiftKey) {
-                            toggleSortFor(header.column as Column<T, unknown>)
-                          }
                         }}
                       >
                         {/* Group / sort are now in the selection ops strip; the
                             header just shows subtle state indicators. A DOUBLE
                             click on a renamable header turns it into the editor
                             above; a single click still selects the column. */}
-                        <span
-                          className="flex-1 truncate"
-                          style={canRename ? { cursor: 'text' } : undefined}
-                          title={canRename ? 'Double-click to rename' : undefined}
-                          onDoubleClick={
-                            canRename
-                              ? (event) => {
-                                  event.preventDefault()
-                                  event.stopPropagation()
-                                  setRenameDraft(headerLabel as string)
-                                  setRenamingColumnId(header.column.id)
-                                }
-                              : undefined
-                          }
-                        >
-                          {/* An empty user header renders as empty string (no
-                              placeholder). Double-click still enters rename via
-                              the affordance on the wrapping span above. */}
-                          {flexRender(
-                            header.column.columnDef.header,
-                            header.getContext(),
-                          )}
-                        </span>
+                        {canRename ? (
+                          /*
+                           * A header you can name is just a text field — the
+                           * same as every data cell in the grid.
+                           *
+                           * It used to be a span that swapped into an editor on
+                           * double-click. That failed in two ways at once: an
+                           * empty header rendered a 0px-tall box with nothing
+                           * to hit, and even when there was text, needing a
+                           * double-click on a header is not a convention
+                           * anybody expects in a spreadsheet. Click and type.
+                           *
+                           * Uncontrolled, keyed on the committed label, so the
+                           * field remounts when the name changes from outside
+                           * (promoting a row to the header) without fighting
+                           * the user mid-edit.
+                           */
+                          <input
+                            key={`${header.column.id}:${headerLabel as string}`}
+                            defaultValue={headerLabel as string}
+                            placeholder="Name column"
+                            aria-label={`Column name${
+                              headerLabel ? `: ${headerLabel}` : ''
+                            }`}
+                            className="w-full min-w-0 flex-1 truncate border-0 bg-transparent p-0 font-bold text-inherit outline-none placeholder:font-normal placeholder:italic placeholder:text-slate-400 focus:ring-0"
+                            // Typing here must never reach the column drag,
+                            // the column selection or the cell grid.
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                            onKeyDown={(event) => {
+                              event.stopPropagation()
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                event.currentTarget.blur()
+                              } else if (event.key === 'Escape') {
+                                event.preventDefault()
+                                event.currentTarget.value = headerLabel as string
+                                event.currentTarget.blur()
+                              }
+                            }}
+                            onBlur={(event) => {
+                              const next = event.target.value
+                              if (next !== headerLabel) {
+                                onRenameColumn?.(header.column.id, next)
+                              }
+                            }}
+                          />
+                        ) : (
+                          <span className="flex-1 truncate min-h-[1.25rem] leading-5">
+                            {flexRender(
+                              header.column.columnDef.header,
+                              header.getContext(),
+                            )}
+                          </span>
+                        )}
                         {header.column.getIsGrouped() ? (
                           <span
                             aria-hidden="true"
@@ -1580,30 +1586,80 @@ export function CustomTable<T extends RowData>({
                           </span>
                         ) : null}
                         {(() => {
-                          // A group band is never itself sorted, so show the
-                          // state of the leaf it delegates to — otherwise
-                          // clicking "Name" sorts the grid with no visible
-                          // feedback on the thing you clicked.
+                          // Sorting is its own control, never the header
+                          // click — selecting a column must not reorder rows.
+                          //
+                          // Three states, always visible so the affordance is
+                          // discoverable rather than hover-only:
+                          //   ⇅  unsorted (default)
+                          //   ▲  ascending
+                          //   ▼  descending
+                          //
+                          // A group band has no values of its own, so it
+                          // delegates to its first labelled leaf and shows
+                          // that leaf's state.
                           const sortedBy = sortTargetFor(
                             header.column as Column<T, unknown>,
                           )
-                          const dir = sortedBy?.getIsSorted()
-                          if (!dir) return null
-                          const own = sortedBy?.id === header.column.id
+                          if (!sortedBy) return null
+
+                          const dir = sortedBy.getIsSorted()
+                          const own = sortedBy.id === header.column.id
+                          const glyph = dir === 'asc' ? '▲' : dir === 'desc' ? '▼' : '⇅'
+                          const what = own ? '' : ` by ${sortedBy.id}`
+
+                          // Replay the animation only for the column just
+                          // clicked. `key` forces a remount so the keyframes
+                          // restart even when the class is unchanged (asc →
+                          // asc on a different column).
+                          const flashing = justSortedId === header.column.id
+                          const arrowAnim = !flashing
+                            ? ''
+                            : dir === 'asc'
+                              ? 'jt-sort-arrow--asc'
+                              : dir === 'desc'
+                                ? 'jt-sort-arrow--desc'
+                                : ''
+
                           return (
-                            <span
-                              aria-hidden="true"
-                              title={
-                                own
-                                  ? `Sorted ${dir}`
-                                  : `Sorted ${dir} by ${sortedBy?.id}`
+                            <button
+                              type="button"
+                              data-sort-handle="true"
+                              aria-label={
+                                dir
+                                  ? `Sorted ${dir}${what} — click to cycle`
+                                  : `Sort${what}`
                               }
-                              className={`shrink-0 text-xs ${
-                                own ? 'text-accent-600' : 'text-accent-400'
+                              title={
+                                dir === 'asc'
+                                  ? `Sorted ascending${what} · click for descending`
+                                  : dir === 'desc'
+                                    ? `Sorted descending${what} · click to clear`
+                                    : `Click to sort${what}`
+                              }
+                              className={`shrink-0 rounded px-0.5 text-xs leading-none transition-colors sm:hover:bg-slate-300 ${
+                                flashing ? 'jt-sort-flash' : ''
+                              } ${
+                                dir
+                                  ? own
+                                    ? 'text-accent-600'
+                                    : 'text-accent-400'
+                                  : 'text-slate-400'
                               }`}
+                              // The header beneath selects the column, and the
+                              // <th> starts a drag-reorder — this button must
+                              // do neither.
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onClick={(event) => {
+                                event.preventDefault()
+                                event.stopPropagation()
+                                toggleSortFor(header.column as Column<T, unknown>)
+                              }}
                             >
-                              {dir === 'asc' ? '▲' : '▼'}
-                            </span>
+                              <span key={`${dir}-${flashing}`} className={arrowAnim}>
+                                {glyph}
+                              </span>
+                            </button>
                           )
                         })()}
                       </div>

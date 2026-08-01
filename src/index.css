@@ -310,8 +310,79 @@
   opacity: 0.75;
 }
 
+/* ---------------------------------------------------------------- sorting */
+
+/* A sort can reorder hundreds of rows, most of them off-screen, while the only
+   thing that visibly changes is a small glyph. These cues say "that click did
+   something, and it was this column". */
+
+/* The arrow travels the way the data just went, then settles. */
+@keyframes jt-sort-arrow-asc {
+  0% {
+    transform: translateY(4px);
+    opacity: 0.3;
+  }
+  60% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes jt-sort-arrow-desc {
+  0% {
+    transform: translateY(-4px);
+    opacity: 0.3;
+  }
+  60% {
+    transform: translateY(2px);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* A wash across the header that fades out, so the eye lands on the column that
+   changed instead of hunting for the glyph. */
+@keyframes jt-sort-flash {
+  0% {
+    background-color: rgb(14 165 233 / 28%);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.jt-sort-arrow--asc {
+  display: inline-block;
+  animation: jt-sort-arrow-asc 340ms ease-out;
+}
+
+.jt-sort-arrow--desc {
+  display: inline-block;
+  animation: jt-sort-arrow-desc 340ms ease-out;
+}
+
+/* Cleared back to unsorted: no direction to point at, so just the wash. */
+.jt-sort-flash {
+  animation: jt-sort-flash 650ms ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .jt-root .jt-group-caret {
     transition: none;
+  }
+
+  /* Motion is the cue for people who want it; the glyph and tooltip already
+     say the same thing for everyone else. */
+  .jt-sort-arrow--asc,
+  .jt-sort-arrow--desc,
+  .jt-sort-flash {
+    animation: none;
   }
 }
