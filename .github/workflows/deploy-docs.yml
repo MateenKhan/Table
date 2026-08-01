@@ -41,8 +41,15 @@ jobs:
           cache: npm
 
       # ── the live demo: the application itself ──────────────────────────────
+      #
+      # `npm install`, not `npm ci`, on purpose. Both lockfiles here were
+      # generated on Windows, and npm records only the host platform's
+      # optional dependencies (npm/cli#4828) — so `npm ci` on Linux resolves
+      # the tree without @rollup/rollup-linux-x64-gnu and the build dies at
+      # "Cannot find module". `npm install` re-resolves optional deps for the
+      # platform it is actually running on.
       - name: Install app dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Build the demo app
         env:
@@ -51,9 +58,10 @@ jobs:
         run: npm run build
 
       # ── the docs site ─────────────────────────────────────────────────────
+      # Same platform-optional-dependency caveat as the app install above.
       - name: Install docs dependencies
         working-directory: website
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Build docs site
         working-directory: website
