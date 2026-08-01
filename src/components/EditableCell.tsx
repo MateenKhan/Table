@@ -6,7 +6,6 @@ import 'react-day-picker/style.css'
 import { useCellSelection } from '../useCellSelection'
 import { TableMeta } from '../tableModels'
 import {
-  acceptsInput,
   alignmentFor,
   formatCellValue,
   isDateType,
@@ -227,10 +226,24 @@ export function EditableCell<T extends RowData>({
   // exposes the raw number so it can be retyped.
   const display = formatCellValue(value, typeOptions)
 
+  /**
+   * While editing, the draft accepts anything. Validation happens on commit.
+   *
+   * This used to drop any keystroke that left the draft failing the column's
+   * type check, and drop it *silently* — no beep, no rejection, the character
+   * simply never appeared. On a numeric column that made formulas impossible
+   * to type over an existing value: editing `166` and typing `=100+200` gives
+   * the intermediate draft `166=`, which is not a valid number, so the `=` was
+   * discarded — and every digit after it just concatenated onto the old value,
+   * turning the cell into `166100200`.
+   *
+   * Per-keystroke type checking cannot work, because valid input passes
+   * through invalid intermediate states. It is also not how a spreadsheet
+   * behaves: Excel and Sheets let you type freely and decide what the value is
+   * when you commit. `coerceValue` already does exactly that here.
+   */
   const onDraftChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const next = event.target.value
-    if (!acceptsInput(next, typeOptions?.type)) return
-    setDraft(next)
+    setDraft(event.target.value)
   }
 
   // Committing an edit while focus is still inside the cell's own date popover
