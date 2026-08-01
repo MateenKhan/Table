@@ -42,14 +42,24 @@ jobs:
 
       # ── the live demo: the application itself ──────────────────────────────
       #
-      # `npm install`, not `npm ci`, on purpose. Both lockfiles here were
-      # generated on Windows, and npm records only the host platform's
-      # optional dependencies (npm/cli#4828) — so `npm ci` on Linux resolves
-      # the tree without @rollup/rollup-linux-x64-gnu and the build dies at
-      # "Cannot find module". `npm install` re-resolves optional deps for the
-      # platform it is actually running on.
+      # The lockfile is dropped before installing, which is what rollup's own
+      # error message tells you to do.
+      #
+      # Both lockfiles here were authored on Windows, and npm materialises only
+      # the host platform's optional dependencies as package entries
+      # (npm/cli#4828) — @rollup/rollup-linux-x64-gnu is recorded as a
+      # declaration but never as an installed entry. `npm ci` and plain
+      # `npm install` both honour that and the Linux build dies on "Cannot find
+      # module". Regenerating the lockfile inside a Linux container does not fix
+      # it either; npm still only writes the platform it ran on.
+      #
+      # The trade-off is real: CI resolves fresh instead of installing a pinned
+      # tree. Acceptable for a static docs deploy — nothing here is published to
+      # a registry — but it is why a build can drift without a commit.
       - name: Install app dependencies
-        run: npm install --no-audit --no-fund
+        run: |
+          rm -f package-lock.json
+          npm install --no-audit --no-fund
 
       - name: Build the demo app
         env:
@@ -61,7 +71,9 @@ jobs:
       # Same platform-optional-dependency caveat as the app install above.
       - name: Install docs dependencies
         working-directory: website
-        run: npm install --no-audit --no-fund
+        run: |
+          rm -f package-lock.json
+          npm install --no-audit --no-fund
 
       - name: Build docs site
         working-directory: website
