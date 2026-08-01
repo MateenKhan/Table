@@ -1,0 +1,88 @@
+---
+id: query
+title: Query builder
+sidebar_position: 3
+---
+
+# Query builder
+
+The bar above the grid filters the sheet. It is a **token-based builder**, not a
+text search box: you pick a column, then an operator, then a value, and each
+finished rule becomes a chip you can edit or remove.
+
+Focus it with <kbd>Ctrl</kbd>+<kbd>Q</kbd>.
+
+## Building a rule
+
+Start typing and the bar suggests columns from the sheet's own schema. Pick one
+and it offers only the operators that make sense for that column's type — a text
+column never offers `≥`, a number column never offers `starts with`.
+
+```text
+salary  ≥  19900
+└ column └ operator └ value
+```
+
+Press <kbd>Tab</kbd> or <kbd>Enter</kbd> to accept the highlighted suggestion.
+
+## Operators
+
+Which set you get depends on the column's type.
+
+### Text columns
+
+| Operator | Operands |
+| --- | --- |
+| `contains` | 1 |
+| `does not contain` | 1 |
+| `equals` | 1 |
+| `not equals` | 1 |
+| `starts with` | 1 |
+| `ends with` | 1 |
+| `is empty` | 0 |
+| `is not empty` | 0 |
+
+### Number columns
+
+| Operator | Operands |
+| --- | --- |
+| `=` | 1 |
+| `≠` | 1 |
+| `>` | 1 |
+| `≥` | 1 |
+| `<` | 1 |
+| `≤` | 1 |
+| `between` | 2 |
+| `is empty` | 0 |
+
+`between` takes two values and is inclusive of both ends.
+
+## Combining rules
+
+Rules join with **and** / **or**. `and` binds tighter than `or`, so:
+
+```text
+name contains ada  and  salary ≥ 19900  or  status equals single
+```
+
+groups as `(name contains ada AND salary ≥ 19900) OR (status equals single)`.
+There is no nesting and no parentheses — if you need those, filter your data
+before handing it to the table.
+
+## Shortcuts
+
+Alongside the column suggestions the bar offers ready-made shortcuts derived
+from the sheet, such as **Top N** and **Bottom N** for each numeric column.
+Picking one drops in the finished rule.
+
+## Saved queries
+
+A query you use often can be saved from the settings panel and recalled later.
+Saved queries live with the sheet's other persisted settings.
+
+## Find & replace
+
+Filtering is not the same as editing. To change values rather than narrow them,
+use <kbd>Ctrl</kbd>+<kbd>H</kbd> — it searches the whole sheet and replaces in
+place, and every replacement goes through the same undo history as ordinary
+typing.

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Demo — build placeholder</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #0f172a;
+        background: #f8fafc;
+        padding: 2rem;
+        text-align: center;
+      }
+      code {
+        background: #e2e8f0;
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #e2e8f0;
+          background: #0f172a;
+        }
+        code {
+          background: #1e293b;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      Placeholder only. CI replaces this whole folder with the built app.
+
+      It is tracked rather than generated because `onBrokenLinks: 'throw'`
+      validates /demo/ at build time, and the real app does not exist then.
+      Without this the docs build fails locally and in CI before the demo is
+      ever copied in — so the placeholder keeps the strict link check on.
+    -->
+    <div>
+      <h1>Demo not built</h1>
+      <p>
+        This is a placeholder. Build the app with
+        <code>DEMO_BASE=/demo/ npm run build</code> in the repository root, then
+        copy <code>dist/</code> here.
+      </p>
+      <p>The deployed site does this automatically on every push to main.</p>
+    </div>
+  </body>
+</html>

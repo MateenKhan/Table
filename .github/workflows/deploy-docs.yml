@@ -1,0 +1,131 @@
+name: Deploy docs site
+
+# Builds on GitHub's runners and ships only the static output to the VPS.
+# No container, no build tooling on the server — nginx just serves a folder.
+#
+# Two builds go out together: the Docusaurus site, and the app itself, which is
+# dropped in at /demo so the landing page can frame the real thing rather than a
+# screenshot.
+
+on:
+  push:
+    branches: [main]
+    # The demo is the app, so a change to src/ has to redeploy too.
+    paths:
+      - 'website/**'
+      - 'src/**'
+      - 'index.html'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+      - 'tailwind.config.js'
+      - 'postcss.config.js'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch: # lets you redeploy by hand from the Actions tab
+
+concurrency:
+  # A newer push supersedes an in-flight deploy rather than racing it.
+  group: deploy-docs
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # ── the live demo: the application itself ──────────────────────────────
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Build the demo app
+        env:
+          # Asset URLs must be written for the sub-path it is served from.
+          DEMO_BASE: /demo/
+        run: npm run build
+
+      # ── the docs site ─────────────────────────────────────────────────────
+      - name: Install docs dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Build docs site
+        working-directory: website
+        run: npm run build
+
+      - name: Place the demo inside the site
+        run: |
+          rm -rf website/build/demo
+          mkdir -p website/build/demo
+          cp -r dist/. website/build/demo/
+
+          # A missing demo would still deploy as a working site with a dead
+          # link, which is the kind of failure nobody notices for a week.
+          if [ ! -f website/build/demo/index.html ]; then
+            echo "::error::Demo build is missing — website/build/demo/index.html was not produced."
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh
+
+          # Secrets pasted through a browser routinely pick up a trailing
+          # newline or space. ssh then dies with "hostname contains invalid
+          # characters", which points nowhere near the real cause.
+          HOST="$(printf '%s' "$SSH_HOST" | tr -d '[:space:]')"
+          USER_="$(printf '%s' "$SSH_USER" | tr -d '[:space:]')"
+          PORT="$(printf '%s' "$SSH_PORT" | tr -d '[:space:]')"
+          {
+            echo "SSH_HOST_CLEAN=$HOST"
+            echo "SSH_USER_CLEAN=$USER_"
+            echo "SSH_PORT_CLEAN=$PORT"
+          } >> "$GITHUB_ENV"
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Pin the host key so a hijacked DNS record can't collect the deploy key.
+          ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::Could not reach $HOST:$PORT — check the SSH_HOST secret and the firewall."
+            exit 1
+          fi
+
+      - name: Deploy to VPS
+        env:
+          # nginx derives the web root from the hostname, so the folder is
+          # named after the domain and no server config changes per site.
+          SITE_DOMAIN: table.jugaaadi.com
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key -p $SSH_PORT_CLEAN"
+          TARGET="$SSH_USER_CLEAN@$SSH_HOST_CLEAN"
+          WEB_ROOT="/var/www/sites/$SITE_DOMAIN"
+
+          # First deploy of a new site creates its folder; rsync won't.
+          $SSH "$TARGET" "mkdir -p '$WEB_ROOT'"
+
+          # Trailing slash on the source is required, or rsync nests a
+          # build/ directory inside the web root.
+          rsync -az --delete -e "$SSH" website/build/ "$TARGET:$WEB_ROOT/"
+
+      - name: Summary
+        run: |
+          {
+            echo "Deployed to https://table.jugaaadi.com"
+            echo ""
+            echo "- Docs: https://table.jugaaadi.com/docs/intro"
+            echo "- Live demo: https://table.jugaaadi.com/demo/"
+          } >> "$GITHUB_STEP_SUMMARY"

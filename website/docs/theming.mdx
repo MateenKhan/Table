@@ -1,0 +1,84 @@
+---
+id: theming
+title: Theming
+sidebar_position: 4
+---
+
+# Theming & CSS override
+
+Every surface — the whole app, and the portalled popups, tooltips and toasts —
+is restyleable, three ways you can mix freely.
+
+You must import the stylesheet once for any of this to apply:
+
+```tsx
+import '@jugaaadi/table/style.css'
+```
+
+## 1. Recolour with CSS variables
+
+Set any `--jt-*` variable. On `:root` it reaches the portalled surfaces too
+(they mount on `<body>`); on `.jt-root` it scopes to the grid.
+
+```css
+:root {
+  --jt-accent: #7c3aed;        /* brand / focus */
+  --jt-tooltip-bg: #111827;
+  --jt-popup-bg: #ffffff;
+  --jt-popup-radius: 0.75rem;
+}
+```
+
+| Variable | Styles |
+| --- | --- |
+| `--jt-accent`, `--jt-accent-contrast` | Brand / keyboard-focus ring |
+| `--jt-surface`, `--jt-text` | App root surface and text |
+| `--jt-tooltip-bg`, `--jt-tooltip-fg`, `--jt-tooltip-radius` | Tooltips |
+| `--jt-popup-bg`, `--jt-popup-fg`, `--jt-popup-border`, `--jt-popup-radius`, `--jt-overlay` | Popups and dialogs, including the size-limit popup |
+| `--jt-toast-bg`, `--jt-toast-fg`, `--jt-toast-radius` | Toasts |
+| `--jt-lightbox-overlay` | Media lightbox backdrop |
+
+## 2. Restyle anything via `data-jt` attributes
+
+Every surface carries a stable `data-jt="<part>"` you can target with **any**
+CSS. These rules win over the library's own styles, even on the portalled
+surfaces:
+
+```css
+.jt-root [data-jt="toolbar"] { border-bottom: 1px solid #eee; }
+[data-jt="tooltip"] { box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25); }
+[data-jt="popup"]   { border: 2px solid #7c3aed; }
+[data-jt="toast"]   { font-family: ui-monospace, monospace; }
+```
+
+Parts: `root`, `toolbar`, `tooltip`, `popup` (plus `popup-overlay`), `toast`,
+`lightbox`.
+
+## 3. Inject classes with `classNames`
+
+Merge your own classes — Tailwind or otherwise — onto each part:
+
+```tsx
+<SpreadsheetTable
+  columns={columns}
+  classNames={{
+    root: 'rounded-xl shadow',
+    tooltip: 'font-mono',
+    popup: 'border-2 border-violet-500',
+  }}
+/>
+```
+
+## Motion
+
+Animations are guarded by `prefers-reduced-motion`. If you add your own, guard
+them the same way — a user who has asked their system to reduce motion should
+still get the state change, just without the movement:
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  .my-custom-animation {
+    animation: none;
+  }
+}
+```

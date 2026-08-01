@@ -1,0 +1,109 @@
+---
+id: intro
+title: Getting started
+sidebar_position: 1
+---
+
+# Getting started
+
+A spreadsheet-style data table for React — editable cells, formulas, rich column
+types, cell and border formatting, a query builder, find & replace, shareable
+views, and a "build your own" blank sheet. It is a full spreadsheet UI, not just
+a grid.
+
+:::info Built on TanStack Table
+This project is an extension of [TanStack Table v8](https://tanstack.com/table).
+It began as the official "kitchen-sink" example and grew into a complete
+spreadsheet on top of it — TanStack Table remains the core engine (columns,
+sorting, filtering, grouping, pinning, pagination, the row model).
+
+If you use this project, please also star and support
+[TanStack Table](https://github.com/TanStack/table). Attribution is preserved in
+the `LICENSE`.
+:::
+
+## Install
+
+```bash
+npm i @jugaaadi/table
+```
+
+`react` and `react-dom` **18+** are peer dependencies — bring your own.
+
+## Use
+
+```tsx
+import { SpreadsheetTable } from '@jugaaadi/table'
+import '@jugaaadi/table/style.css' // import the stylesheet once
+
+const columns = [
+  { accessorKey: 'name', header: 'Name' },
+  { accessorKey: 'age', header: 'Age' },
+]
+const data = [
+  { name: 'Ada', age: 36 },
+  { name: 'Alan', age: 41 },
+]
+
+export default function App() {
+  return <SpreadsheetTable columns={columns} data={data} />
+}
+```
+
+`columns` are TanStack Table
+[`ColumnDef`](https://tanstack.com/table/latest/docs/api/core/column-def)s,
+re-exported as `ColumnDef`.
+
+Import **`@jugaaadi/table/style.css` once**. The component ships its compiled
+styles, so you do not need Tailwind configured in your own app.
+
+## A blank N×M sheet
+
+Give `rows` and `cols` instead of `columns`/`data` to drop the user into an empty
+sheet they fill in themselves — columns `col1…colN`, editable, with add row and
+add column built in:
+
+```tsx
+<SpreadsheetTable rows={4} cols={4} onDataChange={(rows) => console.log(rows)} />
+```
+
+Headers on a sheet like this are plain text fields: click one and type.
+
+## Reading edits back out
+
+`onDataChange` is the main one — it fires after any change with **all** current
+rows, and does not fire on initial mount:
+
+```tsx
+<SpreadsheetTable
+  columns={columns}
+  data={data}
+  onDataChange={(rows) => save(rows)}
+  onCellChange={(rowIndex, columnId, value) => audit(rowIndex, columnId, value)}
+/>
+```
+
+See [Integrating](./integrating.mdx) for the full prop and event table.
+
+## Keyboard
+
+The grid is fully keyboard-driven. Press <kbd>?</kbd> anywhere in the table for
+the complete shortcut reference, searchable. A few worth knowing up front:
+
+| Keys | Action |
+| --- | --- |
+| <kbd>Enter</kbd> / <kbd>F2</kbd> | Edit the active cell |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Move one cell right / left |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select the whole grid |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | Copy / cut / paste |
+| <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Focus the search |
+| <kbd>Ctrl</kbd>+<kbd>H</kbd> | Find & replace |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> | Undo / redo |
+
+## Disclaimer
+
+Provided as is, without warranty of any kind. The author is not responsible for
+how you use it or for any loss arising from its use — verify your own numbers.
+
+If you think a feature is genuinely missing, please
+[open a pull request](https://github.com/MateenKhan/table/pulls).

@@ -1,0 +1,87 @@
+---
+id: integrating
+title: Integrating
+sidebar_position: 2
+---
+
+# Integrating
+
+Every prop the component accepts, and the events it emits.
+
+## Props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `columns` | `ColumnDef[]` | Column definitions. Omit for a blank sheet. |
+| `data` | `Row[]` | Initial rows (`Row = Record<string, unknown>`). |
+| `rows`, `cols` | `number` | Blank-sheet size when no `columns`/`data` are given. |
+| `maxFileSize` | `number` | Grid-wide max **upload** size in bytes. A per-column `meta.maxFileSize` wins over it. **Undefined means no limit** — there is no built-in default. |
+| `exportEmbedLimit` | `number` | Max bytes per attachment inline-embedded into an exported `.json`/`.html`. Larger ones export as references. **Undefined embeds everything.** |
+| `classNames` | `TableClassNames` | Per-part extra classes: `root`, `toolbar`, `tooltip`, `popup`, `toast`, `lightbox`. See [Theming](./theming.mdx). |
+
+## Events
+
+| Event | Type | Fires when |
+| --- | --- | --- |
+| `onDataChange` | `(rows) => void` | After any change, with **all** current rows. Not fired on initial mount. |
+| `onCellChange` | `(rowIndex, columnId, value) => void` | Per cell whose value changes — typing, fill, paste, clear, undo/redo. |
+| `onColumnChange` | `(columns: ColumnInfo[]) => void` | Columns change: add, remove, rename, retype, reorder, hide. |
+| `onSelectionChange` | `(scope: SelectionScope) => void` | The selection changes (`kind` plus row indices and column ids). |
+| `onCellActivate` | `(info: CellEventInfo) => void` | A cell becomes active by click **or** keyboard — the one to hook an animation to. |
+| `onCellClick` | `(info, event) => void` | A cell is clicked, with the native `MouseEvent`. |
+| `onCellKeyDown` | `(info, event) => void` | A key is pressed while a cell is active, with the native `KeyboardEvent`. |
+| `onColumnHeaderClick` | `(columnId, event) => void` | A column header or letter (A, B, C…) is clicked. |
+| `onRowHeaderClick` | `(rowIndex, event) => void` | A row-number gutter (1, 2, 3…) is clicked. |
+
+### Upload events
+
+| Event | Type | Fires when |
+| --- | --- | --- |
+| `onFileSizeLimitExceeded` | `(info) => boolean \| Promise<boolean>` | An upload is over the limit. Return `true` to **keep**, `false` to **reject**. Omit for the built-in agree/reject popup. |
+| `onUploadToServer` | `(info: UploadToServerInfo) => void` | When set, an upload-to-server button appears on filled attachment cells. **No networking is shipped — you own the upload.** |
+| `onUploadClick`, `onUploadKeyDown`, `onUploadMouseDown`, `onUploadMouseUp`, `onUploadDrop` | `(event, info: UploadCellInfo) => void` | Low-level upload interactions, each with the native DOM event plus the cell. |
+
+## Types
+
+All of these are exported alongside the component:
+
+```ts
+type CellEventInfo = { rowIndex: number; columnId: string; value: unknown }
+type ColumnInfo = { id: string; header: string; type?: string }
+type FileSizeLimitInfo = { file: File; limit: number; rowIndex: number; columnId: string }
+type UploadToServerInfo = { attachment: Attachment; file: File; rowIndex: number; columnId: string }
+type UploadCellInfo = { rowIndex: number; columnId: string }
+```
+
+## Example
+
+```tsx
+<SpreadsheetTable
+  columns={columns}
+  data={data}
+  onCellActivate={({ rowIndex, columnId }) =>
+    myAnimation.trigger(rowIndex, columnId)
+  }
+  onDataChange={(rows) => save(rows)}
+/>
+```
+
+## Persistence and images — read this before you ship
+
+A sheet the user builds themselves survives a reload via `localStorage`. Demo
+data is deliberately ephemeral, and **Restore** brings it back.
+
+`localStorage` is small (a few MB) and synchronous. If your users paste large
+images or attachments into cells, do not rely on it as the store of record —
+take `onDataChange` and persist to your own backend. Use `exportEmbedLimit` to
+decide what gets inline-embedded into an export versus referenced.
+
+## Accessibility and motion
+
+Every control is reachable from the keyboard and labelled for screen readers.
+Sort state is announced on the sort control, and header fields carry an
+accessible name.
+
+All animation — sort arrows, the sorted-column flash, transitions — is wrapped
+in `prefers-reduced-motion`. If a user has asked their OS to reduce motion, they
+get the state change without the movement.

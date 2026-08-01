@@ -6,9 +6,12 @@
   "author": "Mateen Khan",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MateenKhan/Table"
+    "url": "git+https://github.com/MateenKhan/table.git"
   },
-  "homepage": "https://github.com/MateenKhan/Table#readme",
+  "bugs": {
+    "url": "https://github.com/MateenKhan/table/issues"
+  },
+  "homepage": "https://table.jugaaadi.com",
   "keywords": [
     "react",
     "table",
@@ -38,6 +41,9 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "dev": "vite",
