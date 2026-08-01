@@ -530,17 +530,6 @@ export const App = ({
     )
   }, [])
 
-  // Rename a blank-sheet column's header in place.
-  const renameColumn = React.useCallback((columnId: string, name: string) => {
-    setCustomColumns((prev) =>
-      prev
-        ? prev.map((c) =>
-            String(c.id) === columnId ? { ...c, header: name } : c,
-          )
-        : prev,
-    )
-  }, [])
-
   // Append one empty row. In blank-sheet mode it carries every custom column id;
   // otherwise an empty object reads as blank cells against the default schema.
   const addRow = React.useCallback(() => {
@@ -779,6 +768,43 @@ export const App = ({
         selectColumn,
       ) as unknown as typeof baseColumns,
     [effectiveBaseColumns],
+  )
+
+  // Rename a column's header, whatever schema it came from.
+  //
+  // This used to touch `customColumns` only, so renaming was silently a no-op
+  // on every sheet the user had not authored themselves — including the demo
+  // the app opens on. A rename is a structural edit like inserting a column, so
+  // it takes the same three-way path: edit the blank sheet in place, edit an
+  // imported clone in place, or materialise the built-in schema into an
+  // editable clone first. (Hence its position here, after `materializeSchema`.)
+  //
+  // The walk recurses so a column nested under a group is reachable, and
+  // matches group nodes too — whether a group header may be renamed is
+  // CustomTable's call, not this function's.
+  const renameColumn = React.useCallback(
+    (columnId: string, name: string) => {
+      const edit = (defs: typeof baseColumns): typeof baseColumns => {
+        const walk = (arr: unknown[]): unknown[] =>
+          arr.map((raw) => {
+            const def = raw as Record<string, unknown>
+            const next =
+              String(def.id ?? def.accessorKey) === columnId
+                ? { ...def, header: name }
+                : def
+            return Array.isArray(next.columns)
+              ? { ...next, columns: walk(next.columns) }
+              : next
+          })
+        return walk(defs) as typeof baseColumns
+      }
+
+      if (customColumns) setCustomColumns((prev) => (prev ? edit(prev) : prev))
+      else if (importedColumns)
+        setImportedColumns((prev) => (prev ? edit(prev) : prev))
+      else setImportedColumns(edit(materializeSchema()))
+    },
+    [customColumns, importedColumns, materializeSchema],
   )
 
   // Merges are plain descriptors, so they survive a reload like custom
@@ -1505,7 +1531,9 @@ export const App = ({
                   opsSlot={opsSlot}
                   onAddRow={addRow}
                   onAddColumn={isCustomSchema ? addColumn : undefined}
-                  onRenameColumn={isCustomSchema ? renameColumn : undefined}
+                  // Not gated on `isCustomSchema`: renaming works against any
+                  // schema now, materialising a built-in one on first edit.
+                  onRenameColumn={renameColumn}
                   onPromoteRowToHeader={
                     isCustomSchema ? promoteRowToHeader : undefined
                   }

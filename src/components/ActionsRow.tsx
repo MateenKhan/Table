@@ -49,7 +49,18 @@ export default function ActionsRow({
 
   return (
     <div className={`flex flex-col gap-2 ${className}`.trim()}>
-      <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+      {/* The min-height is load-bearing. The contextual ops strip is a captioned
+          group ~74px tall dropping into a row that is otherwise ~44px, so it
+          used to shove the whole table down ~20-30px the moment a selection
+          appeared and yank it back when the selection cleared — most visibly
+          when clicking sort. Reserving the tall state keeps the grid still.
+          Collapsed only: when expanded the ops move to their own row below and
+          this one has nothing to reserve for. */}
+      <div
+        className={`flex flex-wrap items-center gap-2 sm:flex-nowrap${
+          expanded ? '' : ' sm:min-h-[5rem]'
+        }`}
+      >
         {/* Search — full width on narrow screens (actions wrap below); on sm+ it
             grows but keeps at least half the row. */}
         <div className="min-w-0 grow basis-full sm:basis-1/2">{query}</div>

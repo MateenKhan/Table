@@ -1543,7 +1543,16 @@ export function CustomTable<T extends RowData>({
                             aria-label={`Column name${
                               headerLabel ? `: ${headerLabel}` : ''
                             }`}
-                            className="w-full min-w-0 flex-1 truncate border-0 bg-transparent p-0 font-bold text-inherit outline-none placeholder:font-normal placeholder:italic placeholder:text-slate-400 focus:ring-0"
+                            // It was editable before this, but silently: no
+                            // caret colour, no hover, `outline-none` plus
+                            // `focus:ring-0` — a field that looked exactly like
+                            // static text and gave no sign it had focus. Being
+                            // editable is worth nothing if it does not LOOK
+                            // editable. Now it shows a text cursor and a hint
+                            // of a box on hover, and a solid ring with a strong
+                            // caret once focused. `-mx-1 px-1` grows the hit box
+                            // outward without shifting the label off its column.
+                            className="w-full min-w-0 flex-1 -mx-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-bold text-inherit caret-accent-600 outline-none transition-colors cursor-text placeholder:font-normal placeholder:italic placeholder:text-slate-400 sm:hover:border-slate-300 sm:hover:bg-white/70 focus:border-accent-400 focus:bg-white focus:ring-2 focus:ring-accent-100"
                             // Typing here must never reach the column drag,
                             // the column selection or the cell grid.
                             onPointerDown={(event) => event.stopPropagation()}
