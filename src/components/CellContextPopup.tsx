@@ -475,7 +475,10 @@ function ClusterBox({
   tone,
   children,
 }: {
-  name: string
+  // Empty on a CONTINUATION box — a wide group is split across several boxes so
+  // the overflow can keep part of it on the strip (see splitRunForOverflow), and
+  // repeating the caption on each piece would read as several separate groups.
+  name?: string
   tone: 'teal' | 'amber' | 'violet' | 'sky' | 'emerald'
   children: React.ReactNode
 }) {
@@ -500,11 +503,13 @@ function ClusterBox({
     <div
       className={`relative mt-1 inline-flex shrink-0 items-center gap-1 rounded-lg border ${border} bg-white px-2 pb-1 pt-2`}
     >
-      <span
-        className={`absolute -top-2 left-2 bg-white px-1 text-[10px] font-semibold uppercase tracking-wide ${text}`}
-      >
-        {name}
-      </span>
+      {name ? (
+        <span
+          className={`absolute -top-2 left-2 bg-white px-1 text-[10px] font-semibold uppercase tracking-wide ${text}`}
+        >
+          {name}
+        </span>
+      ) : null}
       {children}
     </div>
   )
@@ -1520,11 +1525,10 @@ export function useContextActions<T extends RowData>(
   return { scope, facts, actions: ordered, toggleTextStyle }
 }
 
-// Chunk an ordered action list into contiguous same-group runs. On the strip a
-// run becomes one captioned box — which is also the unit `OverflowGroups` moves
-// into the "⋮" popup, so a group is never half on the strip and half in the
-// menu. In the right-click menu a run becomes one hairline-separated block.
-// Shared so the two surfaces group identically.
+// Chunk an ordered action list into contiguous same-group runs. In the
+// right-click menu a run becomes one hairline-separated block. On the strip a
+// run is split again by `splitRunForOverflow` before it is handed to
+// `OverflowGroups`. Shared so the two surfaces group identically.
 export function groupActionRuns(actions: StripAction[]) {
   const runs: { group: StripGroup; actions: StripAction[] }[] = []
   for (const action of actions) {
@@ -1533,6 +1537,51 @@ export function groupActionRuns(actions: StripAction[]) {
     else runs.push({ group: action.group, actions: [action] })
   }
   return runs
+}
+
+/**
+ * Split one group's actions into several boxes, so `OverflowGroups` has
+ * something finer than a whole group to work with.
+ *
+ * A group used to be atomic: one run, one box, one overflow unit. That is fine
+ * until a single group is wider than the strip — which is the normal case for
+ * Format, whose ~11 controls measure around 600px against a strip that is
+ * typically ~400px. Atomic meant all-or-nothing, so the ENTIRE group dropped
+ * into the "⋮" and the strip rendered a caption and an overflow button next to
+ * several hundred pixels of nothing. Users reasonably read that as broken.
+ *
+ * Splitting fixes it without a measuring pass here: the actions are already
+ * sorted by relevance, so keeping a prefix inline keeps the RIGHT prefix — for
+ * a row selection insert/delete stay put and the colour pickers fold away, not
+ * the other way round.
+ *
+ * The budget is in slots rather than pixels because the real widths are not
+ * known until layout, and `OverflowGroups` measures for real anyway; this only
+ * has to make the units small enough that at least one of them fits. A
+ * composite control (a select, a colour picker, a dropdown trigger) is roughly
+ * twice an icon button, hence the weights.
+ */
+const SLOTS_PER_BOX = 4
+
+export function splitRunForOverflow(actions: StripAction[]): StripAction[][] {
+  const boxes: StripAction[][] = []
+  let current: StripAction[] = []
+  let used = 0
+
+  for (const action of actions) {
+    const cost = action.render ? 2 : 1
+    // Never emit an empty box: an action that is wider than the whole budget
+    // still gets one to itself rather than being dropped.
+    if (current.length && used + cost > SLOTS_PER_BOX) {
+      boxes.push(current)
+      current = []
+      used = 0
+    }
+    current.push(action)
+    used += cost
+  }
+  if (current.length) boxes.push(current)
+  return boxes
 }
 
 /**
@@ -1628,20 +1677,24 @@ export function CellContextStrip<T extends RowData>(
       {/* No `overflow-x-auto` any more: what does not fit goes into the "⋮"
           menu instead of off the right-hand edge of a clipped scroller. */}
       <OverflowGroups className="min-w-0 flex-1">
-        {runs.map((run, runIndex) => (
-          <ClusterBox
-            key={`${run.group}-${runIndex}`}
-            name={GROUP_META[run.group].caption}
-            tone={GROUP_META[run.group].tone}
-          >
-            {run.actions.map((action, index) => (
-              <React.Fragment key={action.id}>
-                {action.dividerBefore && index > 0 ? <RunDivider /> : null}
-                {renderAction(action)}
-              </React.Fragment>
-            ))}
-          </ClusterBox>
-        ))}
+        {runs.flatMap((run, runIndex) =>
+          // One box per SLICE of a run, not per run — see splitRunForOverflow.
+          // Only the first slice carries the caption; the rest continue it.
+          splitRunForOverflow(run.actions).map((slice, sliceIndex) => (
+            <ClusterBox
+              key={`${run.group}-${runIndex}-${sliceIndex}`}
+              name={sliceIndex === 0 ? GROUP_META[run.group].caption : undefined}
+              tone={GROUP_META[run.group].tone}
+            >
+              {slice.map((action, index) => (
+                <React.Fragment key={action.id}>
+                  {action.dividerBefore && index > 0 ? <RunDivider /> : null}
+                  {renderAction(action)}
+                </React.Fragment>
+              ))}
+            </ClusterBox>
+          )),
+        )}
       </OverflowGroups>
     </div>
   )
