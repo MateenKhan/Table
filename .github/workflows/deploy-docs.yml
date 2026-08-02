@@ -116,11 +116,25 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          # Pin the host key so a hijacked DNS record can't collect the deploy key.
-          ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # Is the port even reachable? Distinguishes the two failures that
+          # look identical from the keyscan alone: a refused connection comes
+          # back instantly (sshd down, wrong port), whereas a silent drop
+          # burns the full timeout (firewall DROP, provider-level block).
+          echo "Probing $HOST:$PORT from $(curl -sS --max-time 10 https://api.ipify.org || echo 'unknown runner IP')"
+          probe_start=$(date +%s)
+          if timeout 10 bash -c "cat < /dev/null > /dev/tcp/$HOST/$PORT" 2>/dev/null; then
+            echo "TCP connect succeeded in $(( $(date +%s) - probe_start ))s"
+          else
+            echo "::warning::TCP connect to $HOST:$PORT failed after $(( $(date +%s) - probe_start ))s"
+          fi
+
+          # Pin the host key so a hijacked DNS record can't collect the deploy
+          # key. stderr is kept — hiding it turns every cause into the same
+          # unhelpful "could not reach".
+          ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts || true
 
           if [ ! -s ~/.ssh/known_hosts ]; then
-            echo "::error::Could not reach $HOST:$PORT — check the SSH_HOST secret and the firewall."
+            echo "::error::Could not reach $HOST:$PORT. An instant failure means refused (sshd down or wrong port); a ~5s one means packets dropped (firewall or provider block). The runner IP is printed above — it is what needs allowing."
             exit 1
           fi
 
