@@ -72,6 +72,19 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
       { keys: ['Ctrl', 'Space'], label: 'Add the active cell to the selection' },
       { keys: ['Shift', 'Space'], label: 'Extend the selection to the active cell' },
       { keys: ['Ctrl', 'A'], label: 'Select the whole grid' },
+      {
+        keys: ['Right-click'],
+        label:
+          'Open the actions menu — on a cell, a row number or a column header',
+      },
+      {
+        // The accessible equivalent of a right-click, handled by the grid
+        // itself (see CustomTable's `onGridKeyDown`) because the browser would
+        // otherwise open ITS menu on the scroll container rather than the cell.
+        keys: ['Menu'],
+        label:
+          'Open the actions menu for the selection — or Shift+F10 without a Menu key',
+      },
     ],
   },
   {

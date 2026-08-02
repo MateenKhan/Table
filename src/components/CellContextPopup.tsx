@@ -15,6 +15,7 @@ import {
   Check,
   ChevronDown,
   Combine,
+  Eraser,
   Eye,
   EyeOff,
   FunctionSquare,
@@ -127,7 +128,13 @@ const ROW_HEIGHT_PRESETS: { label: string; name: string; value: number }[] = [
   { label: 'L', name: 'Tall', value: 108 },
 ]
 
-type Props<T extends RowData> = {
+// Everything a surface needs to bind the descriptor list to the current
+// selection. Exported because there are now TWO renderers — the inline strip
+// below and the right-click menu in CellContextMenu.tsx — and CustomTable binds
+// this prop bag exactly ONCE and hands the same object to both. That is what
+// makes "the strip and the menu can never disagree" true by construction rather
+// than by discipline: same props in, same descriptors out.
+export type ContextActionProps<T extends RowData> = {
   // Every `tableFormatting` scope key the current selection maps to. Colour /
   // alignment / border writes fan out across ALL of them (one for a whole
   // column / row, one-per-cell for a free range). The first key is also read
@@ -235,7 +242,7 @@ const EMPTY_SCOPE: SelectionScope = {
 // far the smallest cluster (three icon buttons), and — see the relevance table
 // below — being small is what lets it be the cluster that always survives the
 // fit. Burying "Delete column" is the bug this whole file is fixing.
-type StripGroup = 'structure' | 'format' | 'column' | 'row' | 'formula'
+export type StripGroup = 'structure' | 'format' | 'column' | 'row' | 'formula'
 
 const GROUP_META: Record<
   StripGroup,
@@ -288,7 +295,7 @@ const GROUP_RELEVANCE: Record<
 // closes over the props it needs (the descriptors are built inside the
 // component), and takes only the selection here, so "is this relevant?" reads
 // as a question about the selection rather than about the caller's wiring.
-type StripFacts = {
+export type StripFacts = {
   scope: SelectionScope
   kind: SelectionScope['kind']
   // Distinct data rows / columns the selection covers. These are what the
@@ -299,9 +306,9 @@ type StripFacts = {
 
 // Tints for the plain icon-button actions. Spelled out as literals so Tailwind
 // keeps every class in the build.
-type ActionTone = 'neutral' | 'teal' | 'sky' | 'violet' | 'emerald' | 'danger'
+export type ActionTone = 'neutral' | 'teal' | 'sky' | 'violet' | 'emerald' | 'danger'
 
-const TONE_CLASS: Record<ActionTone, string> = {
+export const TONE_CLASS: Record<ActionTone, string> = {
   neutral: 'text-slate-600',
   teal: 'text-teal-600',
   sky: 'text-sky-600',
@@ -310,7 +317,26 @@ const TONE_CLASS: Record<ActionTone, string> = {
   danger: 'text-rose-600 sm:hover:bg-rose-50 sm:hover:text-rose-600',
 }
 
-type StripAction = {
+// How a descriptor presents in the RIGHT-CLICK menu (CellContextMenu). The
+// menu is a second RENDERER over this one list, not a second list, so every
+// descriptor has to answer "and what do you look like as a menu row?".
+//
+//   'item'   — a role="menuitem" row: leading icon, label, click to run. The
+//              natural shape for anything that is already `icon` + `onSelect`.
+//   'inline' — a labelled row that HOSTS the descriptor's own `render()`
+//              control. The composite controls (colour pickers, the border
+//              picker, the number-format panel, the column-type listbox, the
+//              Arrange / Hidden / Row-height dropdowns) are all trigger buttons
+//              that portal their own panel to <body> and mark it
+//              `data-popover-portal`, so they work unchanged inside the menu —
+//              the menu's outside-close skips those panels, exactly as
+//              OverflowGroups already does for the strip's "⋮".
+//   'omit'   — not offered in the menu at all.
+//
+// Default: `render` → 'inline', otherwise 'item'.
+export type MenuMode = 'item' | 'inline' | 'omit'
+
+export type StripAction = {
   // Stable across selections — it is the React key and the overflow menu's
   // identity, so it must not encode the current count.
   id: string
@@ -338,6 +364,25 @@ type StripAction = {
   // font selects, the border control, the column-type picker and the dropdown
   // menus all own internal state or a non-button shape.
   render?: () => React.ReactNode
+
+  /* ── per-surface presentation ──────────────────────────────────────────────
+     `applies` answers "is this relevant to the selection?" — the same answer on
+     every surface. These two answer "and how does this SURFACE show it?", which
+     is a different question and the only one the two renderers may differ on.
+     Anything else (labels, handlers, ordering, availability) is shared, so the
+     surfaces cannot drift apart. */
+
+  // Presence on the inline strip. 'omit' is for actions that are deliberately
+  // menu-only — see `clear-contents`, which the strip gave up on purpose when
+  // Clear moved next to the Danger group.
+  strip?: 'control' | 'omit'
+  // Presence in the right-click menu. Defaults as described on `MenuMode`.
+  menu?: MenuMode
+  // Consecutive 'inline' actions that share a cluster id collapse onto ONE menu
+  // row, captioned by the cluster's label — so B / I / U is a single "Text
+  // style" row rather than three, and the menu stays a menu instead of turning
+  // into a second toolbar. The first member of a run supplies the label.
+  menuCluster?: { id: string; label: string }
 }
 
 /* ------------------------------------------------------------------ pieces */
@@ -694,12 +739,42 @@ function planAutosum(
     }))
 }
 
-/* ------------------------------------------------------------- the strip */
+/* --------------------------------------------------------------- the model */
 
-export function CellContextStrip<T extends RowData>(props: Props<T>) {
+// What both renderers consume: the descriptor list already filtered by
+// `applies` and ordered by relevance, plus the facts it was filtered against.
+export type ContextActionModel = {
+  scope: SelectionScope
+  facts: StripFacts
+  // Filtered + ordered. A renderer still drops what its own surface omits
+  // (`strip`/`menu`), but it never re-decides availability or order.
+  actions: StripAction[]
+  // The character-style toggle, handed out so exactly ONE surface can own the
+  // Ctrl+B/I/U shortcut (see `useTextStyleShortcuts`).
+  toggleTextStyle: (key: TextStyleKey) => void
+}
+
+/**
+ * Build the contextual action descriptors for a selection.
+ *
+ * This is the whole point of the descriptor refactor generalised one step: the
+ * list of "actions that apply to this selection, ordered by relevance" is
+ * exactly what an ops strip renders AND exactly what a right-click menu
+ * renders, so it is computed once, here, and both surfaces render the result.
+ * A new action becomes available in both places by being added to one array.
+ *
+ * A hook rather than a plain function because it subscribes to the formatting
+ * and column-type stores and reads the grid's selection context — the same
+ * subscriptions the strip has always had.
+ */
+export function useContextActions<T extends RowData>(
+  props: ContextActionProps<T>,
+): ContextActionModel {
   const {
     scopeKeys,
-    title,
+    // `title` is a pure presentation prop — each renderer shows it its own way
+    // (an eyebrow chip on the strip, a header on the menu), so the model never
+    // reads it.
     scope: scopeProp,
     onEnterFormula,
     table,
@@ -764,36 +839,6 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
     const next = format[key] ? undefined : true
     scopeKeys.forEach((k) => tableFormatting.update(k, { [key]: next }))
   }
-
-  // Ctrl/⌘+B / I / U. Bound HERE rather than in the grid's own key handler for
-  // two reasons: this component is the only thing that knows which scope keys a
-  // character style has to be written through, and the strip is mounted exactly
-  // when there is a selection — which is exactly when the shortcuts mean
-  // anything. The guards mirror `useCellSelection`'s: an event aimed at a form
-  // control (the cell editor, the query box, a toolbar select) belongs to that
-  // control. Swallowing the event matters for Ctrl+U in particular, which the
-  // browser would otherwise take as "view source".
-  const toggleRef = React.useRef(toggleTextStyle)
-  toggleRef.current = toggleTextStyle
-  React.useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return
-      if (event.altKey || event.shiftKey) return
-      const pressed = event.key.toLowerCase()
-      const style = TEXT_STYLES.find(
-        (entry) => entry.shortcut.slice(-1).toLowerCase() === pressed,
-      )
-      if (!style) return
-      const target = event.target as HTMLElement | null
-      const tag = target?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-      if (target?.isContentEditable) return
-      event.preventDefault()
-      toggleRef.current(style.key)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
 
   // ── Number format targets ──────────────────────────────────────────────────
   // Number format is a per-COLUMN, value-presentation concern (see the ownership
@@ -893,6 +938,10 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       label: 'Background color',
       group: 'format',
       applies: () => true,
+      // Both swatch buttons share one menu row — "Colour: [fill] [text]" reads
+      // as one decision, and it keeps the menu from opening eight rows tall
+      // before it reaches the row/column ops somebody right-clicked for.
+      menuCluster: { id: 'colour', label: 'Colour' },
       render: () => (
         <ColorPickerButton
           label="Background color"
@@ -908,6 +957,7 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       label: 'Text color',
       group: 'format',
       applies: () => true,
+      menuCluster: { id: 'colour', label: 'Colour' },
       render: () => (
         <ColorPickerButton
           label="Text color"
@@ -926,6 +976,8 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       // number format there is no column type that makes bold nonsensical.
       applies: () => true,
       dividerBefore: index === 0,
+      // One "Text style: B I U" menu row, not three rows of one toggle each.
+      menuCluster: { id: 'text-style', label: 'Text style' },
       render: () => {
         // Reads the STORED format for the first scope key, not the resolved one,
         // so the pressed state answers "did I set this here?" — the same
@@ -955,6 +1007,7 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       group: 'format',
       applies: () => true,
       dividerBefore: index === 0,
+      menuCluster: { id: 'align', label: 'Align' },
       render: () => {
         const active = format.align === value
         return (
@@ -980,6 +1033,14 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       label: 'Font size',
       group: 'format',
       applies: () => !!fontSizes && fontSizes.length > 0,
+      // The only two controls the menu turns down, and for a mechanical reason
+      // rather than a taste one: these are native <select>s, and a native
+      // dropdown is NOT a DOM element — its option list is drawn by the OS. The
+      // menu cannot treat a click in it as "inside" the way it can for the
+      // `data-popover-portal` panels every other composite control uses, so
+      // picking a font would dismiss the menu under the picker. They stay on the
+      // strip, which is not transient and does not care.
+      menu: 'omit',
       render: () => (
         <select
           className="select-sm !w-[4.5rem] pr-5 text-slate-600 border-slate-300"
@@ -1002,6 +1063,8 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       label: 'Font family',
       group: 'format',
       applies: () => !!fontFamilies && fontFamilies.length > 0,
+      // Same native-<select> reason as the size picker above.
+      menu: 'omit',
       render: () => (
         <select
           className="select-sm !w-[5rem] pr-5 text-slate-600 border-slate-300"
@@ -1312,6 +1375,40 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       dividerBefore: true,
       onSelect: () => onMergeColumns!(),
     },
+    {
+      // Menu-only, and deliberately so. Clear was taken OFF the strip when it
+      // moved next to the Danger group, and that decision stands — but "empty
+      // what I just right-clicked" is the single most-reached-for item in a
+      // spreadsheet context menu, and it is already a first-class selection
+      // operation (`clearSelection` clears exactly the selection, whatever its
+      // shape, undoably). `strip: 'omit'` is the mirror of `menu: 'omit'`: one
+      // list, each descriptor saying where it belongs.
+      id: 'clear-contents',
+      label:
+        facts.kind === 'rows'
+          ? `Clear ${plural(facts.rowCount, 'row')}`
+          : facts.kind === 'columns'
+            ? `Clear ${plural(facts.columnCount, 'column')}`
+            : facts.kind === 'all'
+              ? 'Clear everything'
+              : 'Clear contents',
+      group: 'structure',
+      applies: (f) => !!selection && f.kind !== 'none',
+      strip: 'omit',
+      icon: Eraser,
+      tone: 'danger',
+      // Ranked by hand because this one action wants a different neighbour on
+      // each selection kind: right under insert/delete when the user opened the
+      // menu on a row or column header (that cluster is what they came for),
+      // but ahead of the formatting cluster on a cell or range, where clearing
+      // IS the common case and burying it eight rows down would repeat the
+      // discoverability bug the strip was fixing.
+      relevance: (f) =>
+        f.kind === 'rows' || f.kind === 'columns'
+          ? GROUP_RELEVANCE[f.kind].structure - 1
+          : GROUP_RELEVANCE[f.kind].format + 1,
+      onSelect: () => selection!.clearSelection(),
+    },
 
     /* ── ROW ────────────────────────────────────────────────────────────── */
     {
@@ -1328,6 +1425,15 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       label: isRowPinned ? 'Unfreeze row' : 'Freeze row',
       group: 'row',
       applies: () => !!onToggleRowPin,
+      // A toggle, so the strip wants a pressed-state icon button and the menu
+      // wants a plain row. Same label, same handler, two shapes: `render` for
+      // the strip, `icon` + `onSelect` for the menu — which is exactly what
+      // `menu: 'item'` selects. Nothing here can drift, because there is still
+      // only one `onToggleRowPin` and one label expression.
+      menu: 'item',
+      icon: isRowPinned ? PinOff : Pin,
+      tone: 'sky',
+      onSelect: () => onToggleRowPin!(),
       render: () => (
         <button
           type="button"
@@ -1394,7 +1500,7 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
     },
   ]
 
-  /* ------------------------------------------------------------- rendering */
+  /* --------------------------------------------------------------- ordering */
 
   // Filter by relevance-to-the-selection, then order by it. `Array#sort` is
   // stable, and the explicit index tiebreak makes that guarantee load-bearing
@@ -1411,15 +1517,81 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
     })
     .map((entry) => entry.action)
 
-  // Chunk into contiguous same-group runs. Each run becomes one captioned box —
-  // which is also the unit `OverflowGroups` moves into the "⋮" popup, so a group
-  // is never half on the strip and half in the menu.
+  return { scope, facts, actions: ordered, toggleTextStyle }
+}
+
+// Chunk an ordered action list into contiguous same-group runs. On the strip a
+// run becomes one captioned box — which is also the unit `OverflowGroups` moves
+// into the "⋮" popup, so a group is never half on the strip and half in the
+// menu. In the right-click menu a run becomes one hairline-separated block.
+// Shared so the two surfaces group identically.
+export function groupActionRuns(actions: StripAction[]) {
   const runs: { group: StripGroup; actions: StripAction[] }[] = []
-  for (const action of ordered) {
+  for (const action of actions) {
     const last = runs[runs.length - 1]
     if (last && last.group === action.group) last.actions.push(action)
     else runs.push({ group: action.group, actions: [action] })
   }
+  return runs
+}
+
+/**
+ * Ctrl/⌘+B / I / U, bound by whichever surface owns the shortcut.
+ *
+ * It lives outside `useContextActions` for a sharp reason: the model hook is now
+ * called by BOTH the strip and the right-click menu, and a window listener
+ * registered twice would toggle bold twice per press — i.e. never. The STRIP
+ * owns it, because the strip is mounted exactly when there is a selection, which
+ * is exactly when the shortcut means anything; the menu is transient and must
+ * not re-bind it.
+ *
+ * The guards mirror `useCellSelection`'s: an event aimed at a form control (the
+ * cell editor, the query box, a toolbar select) belongs to that control.
+ * Swallowing the event matters for Ctrl+U in particular, which the browser would
+ * otherwise take as "view source".
+ */
+export function useTextStyleShortcuts(
+  toggleTextStyle: (key: TextStyleKey) => void,
+) {
+  const toggleRef = React.useRef(toggleTextStyle)
+  toggleRef.current = toggleTextStyle
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.altKey || event.shiftKey) return
+      const pressed = event.key.toLowerCase()
+      const style = TEXT_STYLES.find(
+        (entry) => entry.shortcut.slice(-1).toLowerCase() === pressed,
+      )
+      if (!style) return
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      if (target?.isContentEditable) return
+      event.preventDefault()
+      toggleRef.current(style.key)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+}
+
+/* --------------------------------------------------------------- the strip */
+
+// The inline ops strip: one horizontal row of captioned clusters, docked above
+// the table. Renderer ONE of the shared descriptor list.
+export function CellContextStrip<T extends RowData>(
+  props: ContextActionProps<T>,
+) {
+  const { title } = props
+  const { actions, toggleTextStyle } = useContextActions(props)
+  useTextStyleShortcuts(toggleTextStyle)
+
+  // Menu-only actions never reach the strip. Everything else is rendered in the
+  // order the model already put it in.
+  const runs = groupActionRuns(
+    actions.filter((action) => action.strip !== 'omit'),
+  )
 
   const renderAction = (action: StripAction) => {
     if (action.render) return action.render()
@@ -1456,9 +1628,9 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
       {/* No `overflow-x-auto` any more: what does not fit goes into the "⋮"
           menu instead of off the right-hand edge of a clipped scroller. */}
       <OverflowGroups className="min-w-0 flex-1">
-        {runs.map((run) => (
+        {runs.map((run, runIndex) => (
           <ClusterBox
-            key={run.group}
+            key={`${run.group}-${runIndex}`}
             name={GROUP_META[run.group].caption}
             tone={GROUP_META[run.group].tone}
           >

@@ -17,7 +17,8 @@ import {
   parseTypedValue,
   TypeOptions,
 } from './columnTypes'
-import { columnDeltaBetween } from './columnOrder'
+import { columnDeltaBetween, lettersForColumnId } from './columnOrder'
+import { PointRefEnd, PointTarget } from './formulaPointing'
 import {
   cyclicIndex,
   describeSeries,
@@ -101,6 +102,12 @@ export type CellSelectionApi = {
   ) => void
   // The corner "select all" gesture: the whole grid.
   onSelectAll: () => void
+  // Select a single cell outright, with no modifier semantics and no drag —
+  // the "put the selection here" gesture a right-click needs before opening a
+  // menu on it. `onCellMouseDown` is the only other way in and it is a DRAG
+  // start gated on button 0, so without this a context menu has to present
+  // itself as a primary click via a synthetic event.
+  selectCell: (pos: CellPos) => void
   // Open the formula editor on the first writable data cell of a column. Used by
   // the column context popup's "Enter formula" action. No-op for read-only /
   // unknown columns.
@@ -138,6 +145,35 @@ export type CellSelectionApi = {
   // whole row / column, or the whole grid — emptying every writable cell and
   // dropping its formula. No-op when nothing is selected. Undoable.
   clearSelection: () => void
+
+  /* ------------------------------------------------------------ point mode */
+  // The grid half of Excel-style formula pointing (see `formulaPointing.ts`).
+  // The editor owns the draft text and calls these to drive a reference cursor
+  // over the grid; the grid owns the cursor's position and is the only thing
+  // that translates a screen cell into A1 terms — through the LIVE letter
+  // space. Neither side reaches into the other's state, and no keyboard
+  // listener is shared: see the note above `pointerStep`.
+
+  // Move the reference cursor by a row/column delta and report the cell (or,
+  // with `extend`, the range) it now covers. Starts from the cell being edited
+  // when no cursor is live yet, so `=` + ArrowUp lands on the neighbour above.
+  // Null when the move would leave the grid, land on a grouped row, or reach a
+  // column that holds no letter — the cursor then stays put and the draft is
+  // left exactly as it was.
+  pointerStep: (
+    rowDelta: number,
+    colDelta: number,
+    extend: boolean,
+  ) => PointTarget | null
+  // Point at an explicit cell — a click (or a drag) while pointing.
+  pointerPick: (pos: CellPos, extend: boolean) => PointTarget | null
+  // Drop the reference cursor (Escape, commit, any non-pointing keystroke).
+  pointerClear: () => void
+  // The editor's "here is a reference, splice it into your draft" callback,
+  // registered for as long as a cell is being edited. Returning false means the
+  // caret is not somewhere a reference may legally go, which is what lets a
+  // click fall through to ordinary "commit this edit and select that cell".
+  registerPointerSink: (sink: ((target: PointTarget) => boolean) | null) => void
 }
 
 const CellSelectionContext = React.createContext<CellSelectionApi | null>(null)
@@ -148,6 +184,31 @@ export const useCellSelection = () => React.useContext(CellSelectionContext)
 // generic blue. accent-500 solid edge + accent-500/10 fill.
 const ACTIVE_COLOR = '#ff3b1d'
 const RANGE_FILL = 'rgba(255, 59, 29, 0.10)'
+
+// The formula reference cursor (point mode). Deliberately NOT the accent: a
+// pointed cell is almost always also a cell the draft already references, so
+// CustomTable's static dashed accent outline is painted underneath it. Same
+// colour would have made "the ref I am moving right now" indistinguishable from
+// "the refs this formula already has" — which is the one thing the marching
+// ants exist to tell apart. Blue + motion reads as different at a glance.
+const POINT_COLOR = '#2563eb'
+// Marching ants. One <div> per boundary side, each with a single repeating
+// gradient, so the keyframes are a plain background-position slide and no side
+// has to know about any other. The four directions run clockwise round the box,
+// which is what makes it read as one moving outline rather than four stripes.
+const ANTS_STYLE = `
+@keyframes jg-ants-right { to { background-position: 12px 0; } }
+@keyframes jg-ants-left { to { background-position: -12px 0; } }
+@keyframes jg-ants-down { to { background-position: 0 12px; } }
+@keyframes jg-ants-up { to { background-position: 0 -12px; } }
+.jg-ants-h { animation: jg-ants-right 0.5s linear infinite; }
+.jg-ants-h-rev { animation: jg-ants-left 0.5s linear infinite; }
+.jg-ants-v { animation: jg-ants-down 0.5s linear infinite; }
+.jg-ants-v-rev { animation: jg-ants-up 0.5s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .jg-ants-h, .jg-ants-h-rev, .jg-ants-v, .jg-ants-v-rev { animation: none; }
+}
+`
 
 // Rows a PageUp / PageDown moves the active cell by. A fixed step rather than a
 // measured viewport height keeps the hook free of any layout reads.
@@ -224,12 +285,23 @@ export function CellSelectionProvider<T extends RowData>({
   // contiguous range, Ctrl adds a separate one (cells, rows or columns).
   const [regions, setRegions] = React.useState<CellRect[]>([])
 
+  // The formula reference cursor, while point mode is driving it. Screen
+  // coordinates like everything else here (it has to be drawn on the grid), and
+  // like everything else here it is void the moment the view changes. `anchor`
+  // is where Shift extends from; `focus` is the end that moves.
+  const [pointer, setPointer] = React.useState<{
+    anchor: CellPos
+    focus: CellPos
+  } | null>(null)
+
   // Whether the shortcuts help popup is open (opened with `?`).
   const [helpOpen, setHelpOpen] = React.useState(false)
   // Bumped to ask the active attachment cell to open its preview (Enter on it).
   const [previewNonce, setPreviewNonce] = React.useState(0)
 
-  const dragMode = React.useRef<'none' | 'select' | 'fill'>('none')
+  // 'point' is a drag of the formula reference cursor (see point mode below):
+  // it selects nothing and writes into the open draft instead.
+  const dragMode = React.useRef<'none' | 'select' | 'fill' | 'point'>('none')
   const initialInput = React.useRef<string | null>(null)
   // Set when an edit is begun via F2, so the editor keeps the value un-selected.
   const editCaret = React.useRef(false)
@@ -785,6 +857,166 @@ export function CellSelectionProvider<T extends RowData>({
   const applyFillRef = React.useRef(applyFill)
   applyFillRef.current = applyFill
 
+  /* ---------------------------------------------------------- point mode */
+
+  // THE SEAM BETWEEN THE GRID'S KEYBOARD LAYER AND THE EDITOR.
+  //
+  // Point mode needs arrow keys to drive a cursor over the GRID while an
+  // <input> holds focus and its text caret stays put. The obvious way to get
+  // that — letting the window-level keydown listener below run during editing —
+  // would mean relaxing the two gates that make it safe (`editingRef.current`
+  // and the INPUT/TEXTAREA/SELECT target test), and those gates protect far
+  // more than the arrows: Delete, Backspace, space, Enter, Escape, Home/End and
+  // every printable character are all bound down there. Weakening them would
+  // put two handlers on every keystroke typed into a cell and make ordinary
+  // editing a race.
+  //
+  // So NOTHING below changes. While a cell is being edited the editor's own
+  // keydown handler is still the only handler that runs, exactly as before; it
+  // simply now recognises a few more keys and, for those, CALLS these methods
+  // instead of letting the browser move the caret. Cooperation is a function
+  // call in one direction, not a shared event — which is why it cannot regress
+  // the non-editing keyboard layer (unreachable from here) and cannot regress
+  // ordinary editing (the editor consumes a key only when a reference is
+  // legal at the caret, and preventDefault on that key is what pins the text
+  // caret in place).
+  //
+  // The grid's contribution is the part the editor cannot do: screen cell →
+  // A1. Both halves go through the live letter space (`lettersForColumnId`)
+  // and the data-row index, never through screen position, so a pointed ref
+  // means the same cell the engine will read when the formula is evaluated.
+  const pointerRef = React.useRef(pointer)
+  pointerRef.current = pointer
+  const pointerSinkRef = React.useRef<((target: PointTarget) => boolean) | null>(
+    null,
+  )
+
+  // A screen cell in A1 terms, or null when it cannot be named: a grouped row
+  // (no data row behind it), a skip column, or a column outside the letter
+  // space (a runtime-merged column). Refusing to name it is deliberate — an
+  // invented ref would resolve to the wrong cell or to `#ERROR`.
+  const pointerEnd = (pos: CellPos): PointRefEnd | null => {
+    const columnId = columnIdAt(pos.col)
+    if (!columnId || skip.has(columnId)) return null
+    const letters = lettersForColumnId(columnId)
+    if (!letters) return null
+    const dataIndex = dataIndexAt(pos.row)
+    if (dataIndex < 0) return null
+    // A1 rows are 1-based DATA rows: `refRow` in formula.ts resolves `C4` to
+    // data row 3. Screen row + 1 would be wrong under sort / filter / paging.
+    return { letters, rowNumber: dataIndex + 1 }
+  }
+
+  const pointerTargetFor = (
+    anchor: CellPos,
+    focus: CellPos,
+  ): PointTarget | null => {
+    const from = pointerEnd(anchor)
+    const to = pointerEnd(focus)
+    if (!from || !to) return null
+    return {
+      from,
+      to,
+      isRange: anchor.row !== focus.row || anchor.col !== focus.col,
+    }
+  }
+
+  // Commit a cursor position, but only if it can actually be spelled. Returning
+  // null without touching state is what makes an illegal move a no-op rather
+  // than a cursor that visibly moves onto a cell it cannot name.
+  const pointerCommit = (
+    anchor: CellPos,
+    focus: CellPos,
+  ): PointTarget | null => {
+    const target = pointerTargetFor(anchor, focus)
+    if (!target) return null
+    setPointer({ anchor, focus })
+    pointerRef.current = { anchor, focus }
+    return target
+  }
+
+  const pointerStep = (
+    rowDelta: number,
+    colDelta: number,
+    extend: boolean,
+  ): PointTarget | null => {
+    const live = pointerRef.current
+    // A fresh cursor starts ON the cell being edited, so the first arrow lands
+    // on its neighbour — and a fresh Shift+arrow spans from the formula's own
+    // cell, which is what Excel does.
+    const origin =
+      live ??
+      (editingRef.current
+        ? { anchor: editingRef.current, focus: editingRef.current }
+        : null)
+    if (!origin) return null
+
+    let next: CellPos = { ...origin.focus }
+    if (colDelta) next = nextSelectableColumn(next, colDelta) ?? next
+    if (rowDelta) {
+      next = {
+        row: Math.min(Math.max(next.row + rowDelta, 0), rows().length - 1),
+        col: next.col,
+      }
+    }
+    if (!isSelectable(next)) return null
+
+    return pointerCommit(extend ? origin.anchor : next, next)
+  }
+
+  const pointerPick = (pos: CellPos, extend: boolean): PointTarget | null => {
+    if (!isSelectable(pos)) return null
+    const live = pointerRef.current
+    const anchor = extend ? (live?.anchor ?? editingRef.current ?? pos) : pos
+    return pointerCommit(anchor, pos)
+  }
+
+  const pointerClear = () => {
+    if (!pointerRef.current) return
+    pointerRef.current = null
+    setPointer(null)
+  }
+
+  const registerPointerSink = (
+    sink: ((target: PointTarget) => boolean) | null,
+  ) => {
+    pointerSinkRef.current = sink
+  }
+
+  // A click while pointing inserts that cell's reference instead of ending the
+  // edit. Handled here (rather than in the editor) because the <td> mousedown
+  // is the grid's event and the editor never sees it; the editor is consulted
+  // through its sink, and if it declines — the caret is not in an operand
+  // position — the click falls straight through to its normal behaviour.
+  const pointerClickHandled = (pos: CellPos, event: React.MouseEvent) => {
+    if (!editingRef.current || !pointerSinkRef.current) return false
+    const target = pointerPick(pos, event.shiftKey)
+    if (target && pointerSinkRef.current(target)) return true
+    pointerClear()
+    return false
+  }
+
+  // The cursor's rectangle, for the marching ants.
+  const pointerRect: CellRect | null = pointer
+    ? {
+        top: Math.min(pointer.anchor.row, pointer.focus.row),
+        bottom: Math.max(pointer.anchor.row, pointer.focus.row),
+        left: Math.min(pointer.anchor.col, pointer.focus.col),
+        right: Math.max(pointer.anchor.col, pointer.focus.col),
+      }
+    : null
+
+  // The cursor only exists inside an edit. Tearing it down when editing ends
+  // covers every exit at once — commit, cancel, blur, navigation, unmount —
+  // rather than each of them having to remember.
+  React.useEffect(() => {
+    if (!editing) {
+      pointerSinkRef.current = null
+      pointerClear()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing])
+
   React.useEffect(() => {
     const onMouseUp = (event: MouseEvent) => {
       const mode = dragMode.current
@@ -1066,6 +1298,28 @@ export function CellSelectionProvider<T extends RowData>({
     }, 60)
   }
 
+  /**
+   * Put the selection on one cell outright — no modifier semantics, no drag.
+   *
+   * This is the gesture a right-click needs: landing outside the current
+   * selection must MOVE it before the menu opens, or the menu acts on whatever
+   * happened to be selected before, which for a delete is a data-loss-shaped
+   * bug. `onCellMouseDown` was the only other way in, and it is a drag START
+   * gated on button 0 — so a context menu had to disguise itself as a primary
+   * click with a synthetic event object. A real entry point is less clever and
+   * much harder to break.
+   */
+  const selectCell = (pos: CellPos) => {
+    if (!isSelectable(pos)) return
+    setEditing(null)
+    focusGrid()
+    setRegions([])
+    multiAnchorRef.current = null
+    setAnchor(pos)
+    setFocus(pos)
+    dragMode.current = 'none'
+  }
+
   const onCellMouseDown = (pos: CellPos, event: React.MouseEvent) => {
     if (event.button !== 0) return
     if (!isSelectable(pos)) return
@@ -1076,6 +1330,16 @@ export function CellSelectionProvider<T extends RowData>({
       editing.col === pos.col
     )
       return
+
+    // Point mode claims the click before the selection does: while a formula
+    // draft is open and its caret is in an operand position, clicking a cell
+    // writes its reference into the draft. preventDefault (and NOT calling
+    // focusGrid) is what keeps focus — and the caret — inside the editor.
+    if (pointerClickHandled(pos, event)) {
+      event.preventDefault()
+      dragMode.current = 'point'
+      return
+    }
 
     // Suppresses native text selection while dragging across cells, and keeps
     // the read-only inputs from stealing focus.
@@ -1112,6 +1376,15 @@ export function CellSelectionProvider<T extends RowData>({
   }
 
   const onCellMouseEnter = (pos: CellPos) => {
+    if (dragMode.current === 'point') {
+      // Dragging while pointing grows the reference into a range, the same way
+      // Shift+arrow does — the sink rewrites the draft in place on every cell.
+      const sink = pointerSinkRef.current
+      if (!sink) return
+      const target = pointerPick(pos, true)
+      if (target) sink(target)
+      return
+    }
     if (dragMode.current === 'select') {
       if (isSelectable(pos)) setFocus(pos)
     } else if (dragMode.current === 'fill') {
@@ -1614,6 +1887,9 @@ export function CellSelectionProvider<T extends RowData>({
     setFillTarget(null)
     setRegions([])
     multiAnchorRef.current = null
+    // The reference cursor is screen-coordinate state too, so it dies with the
+    // rest of it. (Editing is cleared just above, which also drops the sink.)
+    pointerClear()
   }, [viewSignature])
 
   /* ------------------------------------------------------------ rendering */
@@ -1649,8 +1925,81 @@ export function CellSelectionProvider<T extends RowData>({
     return describeSeries(plan?.kind ?? 'copy')
   })()
 
+  // Marching ants for the cell / range the reference cursor is on. Drawn per
+  // cell, but only on the sides that are on the RECTANGLE's boundary, so a
+  // multi-cell range gets one continuous outline instead of a grid of boxes —
+  // the same edge test the range selection uses. Sits above CustomTable's
+  // static dashed highlight (zIndex 2) because the pointed ref is normally also
+  // one of the refs that highlight paints, and above the selection outline
+  // (zIndex 3) because while pointing, the cursor is what the user is steering.
+  const renderPointerAnts = (pos: CellPos): React.ReactNode => {
+    if (!pointerRect || !inRect(pos, pointerRect)) return null
+
+    const dash = (angle: number) =>
+      `repeating-linear-gradient(${angle}deg, ${POINT_COLOR} 0 6px, transparent 6px 12px)`
+    const base: React.CSSProperties = {
+      position: 'absolute',
+      zIndex: 4,
+      pointerEvents: 'none',
+      backgroundRepeat: 'repeat',
+    }
+    const sides: React.ReactNode[] = []
+    if (pos.row === pointerRect.top) {
+      sides.push(
+        <div
+          key="t"
+          className="jg-ants-h"
+          style={{ ...base, top: 0, left: 0, right: 0, height: 2, backgroundImage: dash(90) }}
+        />,
+      )
+    }
+    if (pos.row === pointerRect.bottom) {
+      sides.push(
+        <div
+          key="b"
+          className="jg-ants-h-rev"
+          style={{ ...base, bottom: 0, left: 0, right: 0, height: 2, backgroundImage: dash(90) }}
+        />,
+      )
+    }
+    if (pos.col === pointerRect.left) {
+      sides.push(
+        <div
+          key="l"
+          className="jg-ants-v-rev"
+          style={{ ...base, left: 0, top: 0, bottom: 0, width: 2, backgroundImage: dash(0) }}
+        />,
+      )
+    }
+    if (pos.col === pointerRect.right) {
+      sides.push(
+        <div
+          key="r"
+          className="jg-ants-v"
+          style={{ ...base, right: 0, top: 0, bottom: 0, width: 2, backgroundImage: dash(0) }}
+        />,
+      )
+    }
+
+    return (
+      <span data-testid="formula-point-ants" aria-hidden="true">
+        <span
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 3,
+            pointerEvents: 'none',
+            background: 'rgba(37, 99, 235, 0.10)',
+          }}
+        />
+        {sides}
+      </span>
+    )
+  }
+
   const renderDecoration = (pos: CellPos): React.ReactNode => {
-    if (!rect) return null
+    const ants = renderPointerAnts(pos)
+    if (!rect) return ants
 
     const regs = regions.length ? [...regions, rect] : [rect]
     // A cell belongs to the selection if ANY region covers it. Membership drives
@@ -1662,7 +2011,10 @@ export function CellSelectionProvider<T extends RowData>({
 
     const selected = inSelection(pos.row, pos.col)
     const previewed = !!fillPreview && !selected && inRect(pos, fillPreview)
-    if (!selected && !previewed) return null
+    // The reference cursor is almost always OUTSIDE the selection (it points at
+    // a cell other than the one being edited), so the ants have to survive this
+    // early-out — they are not part of the selection decoration.
+    if (!selected && !previewed) return ants
 
     const isActive = !!anchor && anchor.row === pos.row && anchor.col === pos.col
     // The fill handle rides the bottom-right of the LIVE region only.
@@ -1728,6 +2080,7 @@ export function CellSelectionProvider<T extends RowData>({
     return (
       <>
         <div style={style} />
+        {ants}
         {showModeBadge ? (
           <div
             data-testid="fill-mode-badge"
@@ -1937,6 +2290,7 @@ export function CellSelectionProvider<T extends RowData>({
     onColumnHeaderClick,
     onRowHeaderClick,
     onSelectAll,
+    selectCell,
     beginEditColumn,
     getFormula,
     commitEdit,
@@ -1957,10 +2311,19 @@ export function CellSelectionProvider<T extends RowData>({
       if (regs.length) clearRegions(regs)
     },
     forEachSelectedCell,
+    pointerStep,
+    pointerPick,
+    pointerClear,
+    registerPointerSink,
   }
 
   return (
     <CellSelectionContext.Provider value={api}>
+      {/* The marching-ants keyframes. Carried by the provider rather than the
+          library stylesheet so point mode works for a host that imports the
+          component without the CSS, and so the animation lives next to the code
+          that draws it. */}
+      <style>{ANTS_STYLE}</style>
       {children}
       {helpOpen ? <ShortcutsHelp onClose={() => setHelpOpen(false)} /> : null}
     </CellSelectionContext.Provider>

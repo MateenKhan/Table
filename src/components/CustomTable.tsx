@@ -10,6 +10,7 @@ import {
 import React from 'react'
 import { createPortal } from 'react-dom'
 import { useCellSelection } from '../useCellSelection'
+import type { CellPos } from '../useCellSelection'
 import { useThumbnailMetrics } from '../thumbnailSize'
 import useColumnDrag from '../useColumnDrag'
 import useRowDrag, { buildRowPermutation } from '../useRowDrag'
@@ -28,6 +29,8 @@ import {
 import { formulaRefs, useFormulaRefsVersion } from '../formulaRefs'
 import { useFindHighlight, findKey } from '../tableFind'
 import CellContextStrip from './CellContextPopup'
+import type { ContextActionProps } from './CellContextPopup'
+import CellContextMenu from './CellContextMenu'
 import { Lock, Plus } from 'lucide-react'
 
 // Applied borders are rendered in TWO layers, because a `border-collapse` grid
@@ -106,6 +109,58 @@ function BorderOverlay({ borders }: { borders: Borders }) {
     />
   )
 }
+
+/* ------------------------------------------------- right-click plumbing */
+
+/**
+ * Where the BROWSER's context menu is still the right answer.
+ *
+ * The grid's own menu offers structure and formatting; it has nothing to say
+ * about a caret, a word, or a spelling suggestion. So the line is drawn at a
+ * text field that is BEING EDITED — the cell editor while a cell is open for
+ * editing, a column-name header the user has clicked into — which keeps the
+ * browser's cut / copy / paste / spellcheck exactly where those are the only
+ * useful commands. Anything inside a portalled popover is left alone for the
+ * same reason: those panels own their own inputs (the number-format pattern
+ * box, the border colour field).
+ *
+ * Two things make "being edited" the right test rather than "is an input":
+ *
+ *   • EVERY non-editing cell renders a read-only mirror `<input>` (see
+ *     EditableCell), so "is the target an input?" would hand the entire grid
+ *     back to the browser and this feature would never fire once.
+ *   • Every renamable column header IS a live text field, sized to fill the
+ *     header cell (see the header block below). Testing focus means a header
+ *     you have not clicked into still gives you insert / delete column, while
+ *     one you are actually typing in still gives you paste.
+ *
+ * Everything else on the grid — including an attachment thumbnail — gets the
+ * grid menu, deliberately: a right-click that sometimes selects the cell and
+ * sometimes doesn't, depending on whether that cell happens to hold an image,
+ * is a worse deal than losing "Save image as" on a thumbnail. The full-size
+ * image in the lightbox is not a grid surface and keeps the native menu.
+ */
+function keepsNativeMenu(target: EventTarget | null): boolean {
+  const el = target instanceof Element ? target : null
+  if (!el) return false
+  const field = el.closest('input, textarea, [contenteditable]')
+  if (field && field === document.activeElement) {
+    const writable =
+      field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement
+        ? !field.readOnly && !field.disabled
+        : true
+    if (writable) return true
+  }
+  // Popovers own their contents (and some of them contain real text fields).
+  return !!el.closest('[data-popover-portal]')
+}
+
+// What was right-clicked. The menu itself never sees this — it reads the
+// SELECTION — but it is what decides whether the selection has to move first.
+type MenuTarget =
+  | { kind: 'cell'; pos: CellPos; dataIndex: number; columnId: string }
+  | { kind: 'row'; screenRow: number; dataIndex: number }
+  | { kind: 'column'; columnId: string }
 
 // Width of the leftmost row-number gutter. It lives OUTSIDE TanStack's column
 // model, so every left-pinned column has to be pushed right by exactly this much
@@ -935,6 +990,19 @@ export function CustomTable<T extends RowData>({
                 }
               : undefined
           }
+          // Right-clicking a row number selects the WHOLE row (unless it is
+          // already part of the row selection) and opens the row menu — the
+          // insert / delete / freeze cluster, led by structure.
+          onContextMenu={
+            dataRowIndex >= 0
+              ? (event) =>
+                  openContextMenu(event, {
+                    kind: 'row',
+                    screenRow: rowIndex,
+                    dataIndex: dataRowIndex,
+                  })
+              : undefined
+          }
         >
           <span className="inline-flex items-center justify-center gap-0.5">
             {rowIndex + 1}
@@ -1083,6 +1151,20 @@ export function CustomTable<T extends RowData>({
               onMouseDown={(event) => selection?.onCellMouseDown(pos, event)}
               onMouseEnter={() => selection?.onCellMouseEnter(pos)}
               onDoubleClick={() => selection?.onCellDoubleClick(pos)}
+              // Right-click acts on this cell. A grouped row has no backing
+              // data (`dataRowIndex < 0`), so there is nothing to act on and
+              // the browser keeps its own menu.
+              onContextMenu={
+                dataRowIndex >= 0
+                  ? (event) =>
+                      openContextMenu(event, {
+                        kind: 'cell',
+                        pos,
+                        dataIndex: dataRowIndex,
+                        columnId: cell.column.id,
+                      })
+                  : undefined
+              }
             >
               {justify ? (
                 <div
@@ -1141,7 +1223,22 @@ export function CustomTable<T extends RowData>({
     )
   }
 
-  // ── Inline contextual ops strip ─────────────────────────────────────────────
+  // ── Contextual ops: ONE binding, TWO surfaces ───────────────────────────────
+  // The inline strip above the table and the right-click menu are two renderers
+  // over one descriptor list (see CellContextPopup / CellContextMenu). This
+  // block is where that list is bound to the current selection, and it is bound
+  // EXACTLY ONCE: the same `ContextActionProps` object is handed to the strip
+  // and to the menu, so an action can never mean one thing on one surface and
+  // something else on the other.
+  //
+  // It is also deliberately NOT snapshotted when the menu opens. The menu stores
+  // only a point (`menuAt`); everything about WHAT it acts on is re-derived from
+  // `selection.selectionScope` on every render. A right-click that moves the
+  // selection and opens the menu does both in one event, so the menu's first
+  // render already sees the new selection — and a selection that changes under
+  // an open menu (a sort, a delete) re-derives rather than going stale. Acting
+  // on a stale scope here is the data-loss-shaped bug.
+  //
   // ONE strip, handed the REAL `SelectionScope`. This used to be three mutually
   // exclusive branches gated on `length === 1`, which is why a multi-row or
   // multi-column selection silently fell through to a format-only strip with no
@@ -1165,7 +1262,7 @@ export function CustomTable<T extends RowData>({
   const scope = selection?.selectionScope
   const stripScopeKeys = selection?.getFormatScopeKeys() ?? []
 
-  let strip: React.ReactNode = null
+  let contextProps: ContextActionProps<T> | null = null
   if (selection && scope && scope.kind !== 'none' && stripScopeKeys.length) {
     const { columnIds, rowIndices } = scope
     const isColumns = scope.kind === 'columns'
@@ -1195,78 +1292,178 @@ export function CustomTable<T extends RowData>({
             ? 'All cells'
             : 'Selection'
 
-    strip = (
-      <CellContextStrip
-        scopeKeys={stripScopeKeys}
-        scope={scope}
-        title={stripTitle}
-        // Passed for EVERY selection now, not just a single column: the strip
-        // reads the row count off `options.data` to work out whether an autosum
-        // total has anywhere to land, and the hidden-columns menu needs it too.
-        table={table}
-        column={
-          soleColumnId ? (table.getColumn(soleColumnId) ?? undefined) : undefined
-        }
-        onEnterFormula={
-          soleColumnId && !selection.isReadOnlyColumn(soleColumnId)
-            ? () => selection.beginEditColumn(soleColumnId)
-            : undefined
-        }
-        onInsertColumnLeft={
-          isColumns && onInsertColumn
-            ? () => onInsertColumn(columnIds[0], 'left')
-            : undefined
-        }
-        onInsertColumnRight={
-          isColumns && onInsertColumn
-            ? () => onInsertColumn(columnIds[columnIds.length - 1], 'right')
-            : undefined
-        }
-        onDeleteColumn={
-          isColumns && onDeleteColumn
-            ? () => columnIds.forEach((id) => onDeleteColumn(id))
-            : undefined
-        }
-        rowHeight={
-          isRows ? (rowHeights[firstRowIndex] ?? metrics.rowHeight) : undefined
-        }
-        onSetRowHeight={
-          isRows ? (height) => applyRowHeight(firstRowIndex, height) : undefined
-        }
-        isRowPinned={anchorRow ? anchorRow.getIsPinned() === 'top' : undefined}
-        onToggleRowPin={anchorRow ? () => toggleRowPin(anchorRow) : undefined}
-        onPromoteToHeader={
-          isRows && rowIndices.length === 1 && onPromoteRowToHeader
-            ? () => onPromoteRowToHeader(firstRowIndex)
-            : undefined
-        }
-        onInsertRowAbove={
-          isRows && onInsertRow
-            ? () => onInsertRow(firstRowIndex, 'above')
-            : undefined
-        }
-        onInsertRowBelow={
-          isRows && onInsertRow
-            ? () => onInsertRow(lastRowIndex, 'below')
-            : undefined
-        }
-        onDeleteRow={
-          isRows && onDeleteRow
-            ? () =>
-                [...rowIndices]
-                  .sort((a, b) => b - a)
-                  .forEach((index) => onDeleteRow(index))
-            : undefined
-        }
-        fontSizes={fontSizes}
-        fontFamilies={fontFamilies}
-        onMergeColumns={
-          isColumns && columnIds.length >= 2 && onMergeColumns
-            ? () => onMergeColumns(columnIds)
-            : undefined
-        }
-      />
-    )
+    contextProps = {
+      scopeKeys: stripScopeKeys,
+      scope,
+      title: stripTitle,
+      // Passed for EVERY selection now, not just a single column: the strip
+      // reads the row count off `options.data` to work out whether an autosum
+      // total has anywhere to land, and the hidden-columns menu needs it too.
+      table,
+      column: soleColumnId
+        ? (table.getColumn(soleColumnId) ?? undefined)
+        : undefined,
+      onEnterFormula:
+        soleColumnId && !selection.isReadOnlyColumn(soleColumnId)
+          ? () => selection.beginEditColumn(soleColumnId)
+          : undefined,
+      onInsertColumnLeft:
+        isColumns && onInsertColumn
+          ? () => onInsertColumn(columnIds[0], 'left')
+          : undefined,
+      onInsertColumnRight:
+        isColumns && onInsertColumn
+          ? () => onInsertColumn(columnIds[columnIds.length - 1], 'right')
+          : undefined,
+      onDeleteColumn:
+        isColumns && onDeleteColumn
+          ? () => columnIds.forEach((id) => onDeleteColumn(id))
+          : undefined,
+      rowHeight: isRows
+        ? (rowHeights[firstRowIndex] ?? metrics.rowHeight)
+        : undefined,
+      onSetRowHeight: isRows
+        ? (height: number) => applyRowHeight(firstRowIndex, height)
+        : undefined,
+      isRowPinned: anchorRow ? anchorRow.getIsPinned() === 'top' : undefined,
+      onToggleRowPin: anchorRow ? () => toggleRowPin(anchorRow) : undefined,
+      onPromoteToHeader:
+        isRows && rowIndices.length === 1 && onPromoteRowToHeader
+          ? () => onPromoteRowToHeader(firstRowIndex)
+          : undefined,
+      onInsertRowAbove:
+        isRows && onInsertRow
+          ? () => onInsertRow(firstRowIndex, 'above')
+          : undefined,
+      onInsertRowBelow:
+        isRows && onInsertRow
+          ? () => onInsertRow(lastRowIndex, 'below')
+          : undefined,
+      onDeleteRow:
+        isRows && onDeleteRow
+          ? () =>
+              [...rowIndices]
+                .sort((a, b) => b - a)
+                .forEach((index) => onDeleteRow(index))
+          : undefined,
+      fontSizes,
+      fontFamilies,
+      onMergeColumns:
+        isColumns && columnIds.length >= 2 && onMergeColumns
+          ? () => onMergeColumns(columnIds)
+          : undefined,
+    }
+  }
+
+  const strip = contextProps ? <CellContextStrip {...contextProps} /> : null
+
+  /* ── Right-click / Menu-key context menu ────────────────────────────────── */
+
+  // ONLY the point is state. Everything the menu acts on comes from the live
+  // selection via `contextProps` above — see the note there on why snapshotting
+  // would be the bug.
+  const [menuAt, setMenuAt] = React.useState<{ x: number; y: number } | null>(
+    null,
+  )
+  const closeMenu = React.useCallback(() => setMenuAt(null), [])
+
+  // Nothing selected → nothing to act on → no menu. (Selection can be dropped
+  // out from under an open menu: Esc, a re-sort, deleting the selected rows.)
+  const hasContext = !!contextProps
+  React.useEffect(() => {
+    if (!hasContext) setMenuAt(null)
+  }, [hasContext])
+
+  // Does the CURRENT selection already cover what was right-clicked?
+  //
+  // This is the whole of the "right-click inside the selection keeps it, right
+  // click outside moves it" rule, and getting it wrong is how a menu ends up
+  // deleting rows the user was not looking at. A header target is only "already
+  // covered" by a selection of that same shape: right-clicking a row number
+  // means "act on this row", so a cell range that happens to overlap the row
+  // does not count.
+  const coversTarget = (target: MenuTarget): boolean => {
+    if (!selection || !scope || scope.kind === 'none') return false
+    if (scope.kind === 'all') return true
+    if (target.kind === 'row') {
+      return scope.kind === 'rows' && scope.rowIndices.includes(target.dataIndex)
+    }
+    if (target.kind === 'column') {
+      return (
+        scope.kind === 'columns' && scope.columnIds.includes(target.columnId)
+      )
+    }
+    // A cell. `rowIndices × columnIds` is the BOUNDING set of the selection, so
+    // a miss is definitive and costs one scan; a hit is only proof for the
+    // shapes that are rectangular by construction.
+    if (!scope.rowIndices.includes(target.dataIndex)) return false
+    if (!scope.columnIds.includes(target.columnId)) return false
+    if (scope.kind !== 'range') return true
+    // A 'range' can be several Ctrl-added regions, so its bounding box has
+    // holes. Walk the real regions and stop at the first hit.
+    let covered = false
+    selection.forEachSelectedCell((dataIndex, columnId) => {
+      if (dataIndex === target.dataIndex && columnId === target.columnId) {
+        covered = true
+        return false
+      }
+    })
+    return covered
+  }
+
+  const openContextMenu = (event: React.MouseEvent, target: MenuTarget) => {
+    if (!selection) return
+    if (keepsNativeMenu(event.target)) return
+    event.preventDefault()
+    // Move the selection FIRST when the click landed outside it, so the menu's
+    // very first render already describes what the user pointed at. Both happen
+    // in one event, so React batches them into a single commit — there is no
+    // frame in which the menu is showing one selection's actions while the grid
+    // highlights another.
+    if (!coversTarget(target)) {
+      if (target.kind === 'row') {
+        selection.onRowHeaderClick(target.screenRow, {}, event)
+      } else if (target.kind === 'column') {
+        selection.onColumnHeaderClick(target.columnId, {}, event)
+      } else {
+        selection.selectCell(target.pos)
+      }
+    }
+    setMenuAt({ x: event.clientX, y: event.clientY })
+  }
+
+  // The keyboard equivalent of a right-click: the dedicated Menu key, or
+  // Shift+F10 for keyboards without one. Both are handled here rather than left
+  // to the browser, because their default action is to open the NATIVE menu on
+  // the focused element — which is the grid's scroll container, not a cell.
+  //
+  // The menu is anchored on the selection itself: the header cell for a column
+  // selection, the row-number gutter for a row selection, the first selected
+  // cell otherwise — i.e. the same thing the menu is about to act on, which is
+  // also guaranteed to be on screen (the selection hook scrolls it into view).
+  const onGridKeyDown = (event: React.KeyboardEvent) => {
+    const wantsMenu =
+      event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')
+    if (!wantsMenu || !contextProps || !scope) return
+    if (keepsNativeMenu(event.target)) return
+    event.preventDefault()
+
+    const container = scrollContainerRef.current
+    const dataIndex = scope.rowIndices[0]
+    const columnId = scope.columnIds[0]
+    const anchor =
+      scope.kind === 'columns'
+        ? theadRef.current?.querySelector(`[data-col-id="${columnId}"]`)
+        : scope.kind === 'rows'
+          ? container?.querySelector(`tr[data-data-index="${dataIndex}"] td`)
+          : container?.querySelector(
+              `tr[data-data-index="${dataIndex}"] td[data-col-id="${columnId}"]`,
+            )
+    const rect = (anchor ?? container)?.getBoundingClientRect()
+    if (!rect) return
+    // Bottom-left of the anchor cell, the same corner a pointer-opened menu
+    // grows from.
+    setMenuAt({ x: rect.left + 4, y: rect.bottom })
   }
 
   // Full width of the body grid in column-slots: the row-number gutter (1) + one
@@ -1301,6 +1498,9 @@ export function CustomTable<T extends RowData>({
         // the visible focus indicator, so a ring around the whole region would be
         // noise, not signal.
         tabIndex={0}
+        // The grid is the keyboard focus sink, so the Menu key / Shift+F10 —
+        // the accessible equivalent of a right-click — arrives here.
+        onKeyDown={onGridKeyDown}
         style={{
           // `relative` makes this the containing block for the absolutely
           // positioned row-drop line below (sticky children are unaffected —
@@ -1396,6 +1596,19 @@ export function CustomTable<T extends RowData>({
                       : isSelectCol
                         ? () => table.toggleAllRowsSelected()
                         : undefined
+                  }
+                  // Right-clicking a coordinate letter selects the whole column
+                  // (unless it is already in the column selection) and opens the
+                  // column menu. The `select` checkbox column is not a data
+                  // column and has no column ops, so it keeps the native menu.
+                  onContextMenu={
+                    isData
+                      ? (event) =>
+                          openContextMenu(event, {
+                            kind: 'column',
+                            columnId: col.id,
+                          })
+                      : undefined
                   }
                 >
                   {columnLetterList[index]}
@@ -1511,6 +1724,24 @@ export function CustomTable<T extends RowData>({
                       draggable
                         ? (event) =>
                             drag.onHeaderPointerDown(header.column.id, event)
+                        : undefined
+                    }
+                    // Right-click on the NAME header does what right-click on
+                    // the coordinate letter does. Restricted to a real data
+                    // LEAF: a group band spans several columns and is not
+                    // something `onColumnHeaderClick` can select, so offering a
+                    // menu there would act on the previous selection — exactly
+                    // the stale-target bug. (The rename field inside keeps the
+                    // browser's menu once it has focus — see keepsNativeMenu.)
+                    onContextMenu={
+                      !header.isPlaceholder &&
+                      header.column.columns.length === 0 &&
+                      !NON_DATA_COLUMN_IDS.includes(header.column.id)
+                        ? (event) =>
+                            openContextMenu(event, {
+                              kind: 'column',
+                              columnId: header.column.id,
+                            })
                         : undefined
                     }
                   >
@@ -1826,6 +2057,13 @@ export function CustomTable<T extends RowData>({
         />
       ) : null}
       </div>
+      {/* The right-click menu. Rendered from the SAME `contextProps` the strip
+          above is rendered from, and portalled to <body> from inside (both this
+          scroller and the toolbar slot are overflow containers that would clip
+          it). Unmounting on `menuAt === null` is the close. */}
+      {menuAt && contextProps ? (
+        <CellContextMenu {...contextProps} at={menuAt} onClose={closeMenu} />
+      ) : null}
     </div>
   )
 }

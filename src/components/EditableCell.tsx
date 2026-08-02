@@ -23,7 +23,43 @@ import { useThumbnailMetrics } from '../thumbnailSize'
 import { resolveFormat } from '../formatting'
 import { extractReferences } from '../formula'
 import { formulaRefs } from '../formulaRefs'
+import {
+  beginSession,
+  cycleAtCaret,
+  cycleSession,
+  PointSession,
+  PointTarget,
+  referenceAllowedAt,
+  writeTarget,
+} from '../formulaPointing'
 import FileDropzone from './FileDropzone'
+
+// The arrow keys point mode takes over, and the row/column step each one means.
+const ARROW_DELTA: Record<string, [number, number]> = {
+  ArrowUp: [-1, 0],
+  ArrowDown: [1, 0],
+  ArrowLeft: [0, -1],
+  ArrowRight: [0, 1],
+}
+
+// Keys that leave a live pointing session standing. EVERY other key ends it
+// before doing its normal job — which is exactly what makes "type an operator,
+// then arrow again" start a NEW reference instead of moving the previous one
+// (requirement 5), without that behaviour needing a rule of its own. The bare
+// modifiers are here because Shift+arrow arrives as two keydowns and the first
+// of them must not tear the session down.
+const POINT_SAFE_KEYS = new Set([
+  ...Object.keys(ARROW_DELTA),
+  'F4',
+  'Escape',
+  'Enter',
+  'Tab',
+  'Shift',
+  'Control',
+  'Alt',
+  'Meta',
+  'CapsLock',
+])
 
 // Coerce a stored value into a `Date` for the calendar / time editors. Tolerant
 // of ISO dates ('yyyy-MM-dd'), full ISO instants and raw timestamps; returns
@@ -85,6 +121,13 @@ export function EditableCell<T extends RowData>({
   const wasEditing = React.useRef(false)
   const cancelled = React.useRef(false)
   const pendingSelect = React.useRef(false)
+  // Formula point mode. `pointSession` is non-null exactly while a reference
+  // cursor is live — i.e. while the arrow keys belong to the GRID rather than
+  // to this input's text caret. `pendingCaret` restores the caret after a
+  // programmatic rewrite of the draft (React re-renders the value, which would
+  // otherwise dump the caret at the end of the new text).
+  const pointSession = React.useRef<PointSession | null>(null)
+  const pendingCaret = React.useRef<number | null>(null)
 
   // Extra editors: a `date` popover anchored to the cell, and a mixed-cell
   // thumbnail. These hooks run for every cell (rules-of-hooks) but only matter
@@ -118,6 +161,9 @@ export function EditableCell<T extends RowData>({
     if (isEditing) {
       wasEditing.current = true
       cancelled.current = false
+      // A fresh edit never inherits a reference cursor from the last one.
+      pointSession.current = null
+      pendingCaret.current = null
       const typed = selection?.takeInitialInput() ?? null
       // F2 asks for the caret at the end (value preserved, not selected); Enter
       // and double-click select all. Typing supplies its own char, so no select.
@@ -162,6 +208,84 @@ export function EditableCell<T extends RowData>({
     inputRef.current?.select()
   }, [isEditing, draft])
 
+  // Put the caret back after point mode rewrote the draft. A layout effect (not
+  // an effect) so it lands in the same frame the new text does — a caret that
+  // visibly jumps to the end and back would be worse than not moving it at all.
+  React.useLayoutEffect(() => {
+    const at = pendingCaret.current
+    if (at === null) return
+    pendingCaret.current = null
+    inputRef.current?.setSelectionRange(at, at)
+  }, [draft])
+
+  /* ------------------------------------------------------------ point mode */
+
+  /**
+   * Splice a reference the grid has just pointed at into the draft.
+   *
+   * This is the editor's whole contribution to point mode: the grid decides
+   * WHICH cell (and spells it through the live letter space), this decides
+   * WHERE in the text it goes and rewrites the span in place, so moving the
+   * cursor replaces the reference rather than appending to it.
+   *
+   * Also the grid's click hook. Returning false means "the caret is not
+   * somewhere a reference may go" — the grid then treats the click as an
+   * ordinary click, which is what keeps clicking-away-to-commit working while
+   * a non-formula (or non-operand-position) draft is open.
+   *
+   * Reads the draft and the caret through refs / the DOM rather than through
+   * render state so it is safe to register once and call at any time.
+   */
+  // Adopt a draft point mode has rewritten, and remember where it left the
+  // caret. `draftRef` is updated immediately (not just via the re-render): a
+  // drag fires several rewrites before React paints, and each must splice into
+  // the previous spelling rather than the one on screen.
+  const writeDraft = (next: { draft: string; caret: number }) => {
+    draftRef.current = next.draft
+    pendingCaret.current = next.caret
+    setDraft(next.draft)
+  }
+  // Reached through a ref so the sink below can stay a stable callback (it is
+  // registered with the grid once per edit).
+  const writeDraftRef = React.useRef(writeDraft)
+  writeDraftRef.current = writeDraft
+
+  const acceptPointTarget = React.useCallback((target: PointTarget): boolean => {
+    const input = inputRef.current
+    if (!input) return false
+    const current = draftRef.current
+    let session = pointSession.current
+    if (!session) {
+      // A non-collapsed selection means the keys are collapsing a text
+      // selection (or the value was just select-all'd on opening the editor),
+      // never pointing.
+      if (input.selectionStart !== input.selectionEnd) return false
+      const start = input.selectionStart ?? current.length
+      if (!referenceAllowedAt(current, start)) return false
+      session = beginSession(start)
+    }
+    const next = writeTarget(current, session, target)
+    pointSession.current = next.session
+    writeDraftRef.current(next)
+    return true
+  }, [])
+
+  // Leave point mode, keeping whatever it has written. Idempotent.
+  const endPointing = () => {
+    if (!pointSession.current) return
+    pointSession.current = null
+    selection?.pointerClear()
+  }
+
+  // Offer the grid somewhere to send a pointed reference, for as long as this
+  // cell is the one being edited. The grid clears its own side when editing
+  // ends, so this only has to cover the cell's own lifetime.
+  React.useEffect(() => {
+    if (!isEditing || !selection) return
+    selection.registerPointerSink(acceptPointTarget)
+    return () => selection.registerPointerSink(null)
+  }, [isEditing, selection, acceptPointTarget])
+
   // Live formula-reference highlight. While this cell is being edited with a
   // formula draft (`=…`), publish the cells the formula reads so CustomTable can
   // outline them live as they are typed; a non-formula draft clears it. Only the
@@ -184,20 +308,95 @@ export function EditableCell<T extends RowData>({
     return () => formulaRefs.clear()
   }, [isEditing])
 
+  /**
+   * The editor's keyboard handler — and, while a cell is being edited, the ONLY
+   * keyboard handler that runs.
+   *
+   * The grid's window-level layer bails out on `editingRef` and on an INPUT
+   * target (see `useCellSelection`), and neither of those gates has been
+   * touched: point mode is not two handlers racing for the arrow keys, it is
+   * this handler CALLING the grid. That is what makes the riskiest part of this
+   * feature safe — the grid's keyboard layer is unreachable from here, so it
+   * cannot regress, and ordinary editing is unchanged because a key is consumed
+   * only when a reference is legal at the caret.
+   */
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    const input = inputRef.current
+    const caret = input?.selectionStart ?? draft.length
+    const modified = event.ctrlKey || event.metaKey || event.altKey
+    const delta = ARROW_DELTA[event.key]
+
+    // Anything that is not part of pointing drops the reference cursor first,
+    // and then behaves exactly as it always has.
+    if (pointSession.current && (modified || !POINT_SAFE_KEYS.has(event.key))) {
+      endPointing()
+    }
+
     if (event.key === 'Escape') {
+      // Escape peels off ONE layer. With a reference cursor live it leaves
+      // point mode and keeps the draft — reference and all — so a mis-pointed
+      // ref costs a keystroke, not the whole formula; a second Escape then
+      // cancels the edit exactly as before.
+      if (pointSession.current) {
+        event.preventDefault()
+        endPointing()
+        return
+      }
       event.preventDefault()
       cancelled.current = true
       selection?.stopEditing()
       return
     }
+
+    if (delta && !modified) {
+      // The arrows belong to point mode exactly when a reference is already
+      // being pointed, or when one would be legal where the caret is. The
+      // preventDefault is what pins the TEXT caret in place while the reference
+      // cursor moves over the grid. In every other case we do nothing at all
+      // and the browser moves the caret, as it always did.
+      const collapsed = !input || input.selectionStart === input.selectionEnd
+      const pointing =
+        !!pointSession.current || (collapsed && referenceAllowedAt(draft, caret))
+      if (!pointing || !selection) return
+      event.preventDefault()
+      const target = selection.pointerStep(delta[0], delta[1], event.shiftKey)
+      // A refused move (off the grid, a grouped row, a column with no letter)
+      // leaves both the cursor and the draft alone rather than inventing a ref.
+      if (target) acceptPointTarget(target)
+      return
+    }
+
+    if (event.key === 'F4') {
+      // F4 anchors a reference. Inside a session it respells the one being
+      // pointed at, so nothing moves and the ants stay put; outside one it
+      // cycles the reference next to the caret, which is how an already-typed
+      // formula gets its `$`. Left entirely alone on a non-formula draft.
+      if (!draft.trimStart().startsWith('=')) return
+      const session = pointSession.current
+      if (session) {
+        const result = cycleSession(draft, session)
+        if (!result) return
+        event.preventDefault()
+        pointSession.current = result.session
+        writeDraft(result)
+        return
+      }
+      const result = cycleAtCaret(draft, caret)
+      if (!result) return
+      event.preventDefault()
+      writeDraft(result)
+      return
+    }
+
     if (event.key === 'Enter') {
       event.preventDefault()
+      endPointing()
       selection?.stopEditing('down')
       return
     }
     if (event.key === 'Tab') {
       event.preventDefault()
+      endPointing()
       selection?.stopEditing('right')
     }
   }
@@ -266,6 +465,9 @@ export function EditableCell<T extends RowData>({
       inputMode={numeric ? 'decimal' : undefined}
       onChange={onDraftChange}
       onKeyDown={onKeyDown}
+      // Clicking into the text moves the caret away from the reference the
+      // cursor owns, so the session cannot survive it.
+      onMouseDown={endPointing}
       onBlur={onInputBlur}
       className={`w-full bg-transparent outline-none${
         formula && !isEditing ? ' italic' : ''
