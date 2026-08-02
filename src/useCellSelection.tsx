@@ -12,11 +12,18 @@ import ShortcutsHelp from './components/ShortcutsHelp'
 import { TableMeta } from './tableModels'
 import {
   acceptsInput,
+  ColumnType,
   isAttachmentType,
   parseTypedValue,
   TypeOptions,
 } from './columnTypes'
 import { columnDeltaBetween } from './columnOrder'
+import {
+  cyclicIndex,
+  describeSeries,
+  inferSeries,
+  SeriesPlan,
+} from './fillSeries'
 import { isAttachment } from './attachments'
 import { cellScopeKey, colScopeKey, rowScopeKey } from './formatting'
 import {
@@ -204,6 +211,12 @@ export function CellSelectionProvider<T extends RowData>({
   // The cell the fill handle is currently dragged over - both axes, so the
   // handle fills sideways and diagonally as well as down.
   const [fillTarget, setFillTarget] = React.useState<CellPos | null>(null)
+  // Excel's fill modifier: holding Ctrl (Cmd) while dragging the handle flips
+  // between continuing a series and plainly copying the block. It is read DURING
+  // the drag, which is why it never collides with the grid's other Ctrl
+  // gestures — those are all mouse-DOWN gestures (Ctrl+click banks a region),
+  // and by the time this matters the button is already held.
+  const [fillCopyMode, setFillCopyMode] = React.useState(false)
   // Banked (Ctrl-added) selection rectangles for non-contiguous multi-select.
   // The LIVE region is always the anchor/focus rect; a Ctrl gesture "banks" the
   // current live rect here and opens a fresh one, so the full selection is
@@ -260,7 +273,13 @@ export function CellSelectionProvider<T extends RowData>({
   ].map((c) => c.id)
   const dataRows = () =>
     table.options.data as unknown as Record<string, unknown>[]
-  const meta = () => table.options.meta as TableMeta | undefined
+  // The table meta, plus the OPTIONAL row-growing hook the host may provide.
+  // Declared here rather than in `tableModels` so a host that never supplies it
+  // is unaffected: paste simply keeps the old clamped-at-the-last-row behaviour.
+  const meta = () =>
+    table.options.meta as
+      | (TableMeta & { appendRows?: (count: number) => void })
+      | undefined
 
   const columnIdAt = (col: number) => columnIds()[col] as string | undefined
 
@@ -490,12 +509,56 @@ export function CellSelectionProvider<T extends RowData>({
 
   // Which cell of the source block feeds `index`, as an offset inside the
   // block. Inside the block it is the identity; outside it repeats the block
-  // cyclically in either direction, the way Excel does.
-  const fillOffset = (index: number, start: number, end: number) => {
-    const span = end - start + 1
-    if (index >= start && index <= end) return index - start
-    if (index > end) return (index - end - 1) % span
-    return span - 1 - ((start - 1 - index) % span)
+  // cyclically in either direction, the way Excel does. This is the COPY
+  // mapping — it still decides which source cell a target COPIES from (formula,
+  // attachment and all). A recognised series overrides the value it produces;
+  // see `seriesPlanForColumn` / `seriesPlanForRow`.
+  const fillOffset = (index: number, start: number, end: number) =>
+    cyclicIndex(index - start, end - start + 1)
+
+  // The series a single line of the source block describes — a COLUMN of it when
+  // the fill runs down, a ROW when it runs across. Null means "this line cannot
+  // carry a series at all", which puts every cell it feeds on the copy path:
+  // a formula owns its own translation (`fillCell` shifts its references, which
+  // is a far better answer than any value series), and a grouped row has no
+  // backing data to read. A line that simply has no pattern is not null — it
+  // comes back as a `copy` plan, which is the same cyclic repeat as before.
+  const seriesPlanForColumn = (
+    source: CellRect,
+    col: number,
+  ): SeriesPlan | null => {
+    const columnId = columnIdAt(col)
+    if (!columnId) return null
+    const values: unknown[] = []
+    for (let r = source.top; r <= source.bottom; r++) {
+      const dataIndex = dataIndexAt(r)
+      if (dataIndex < 0) return null
+      if (formulasRef.current[formulaKey(dataIndex, columnId)]) return null
+      values.push(dataRows()[dataIndex]?.[columnId])
+    }
+    return inferSeries(values, { type: columnOptions(columnId)?.type })
+  }
+
+  const seriesPlanForRow = (
+    source: CellRect,
+    row: number,
+  ): SeriesPlan | null => {
+    const dataIndex = dataIndexAt(row)
+    if (dataIndex < 0) return null
+    const values: unknown[] = []
+    const types = new Set<ColumnType | undefined>()
+    for (let c = source.left; c <= source.right; c++) {
+      const columnId = columnIdAt(c)
+      if (!columnId) return null
+      if (formulasRef.current[formulaKey(dataIndex, columnId)]) return null
+      values.push(dataRows()[dataIndex]?.[columnId])
+      types.add(columnOptions(columnId)?.type)
+    }
+    // Date stepping is offered only when every column of the line agrees it is a
+    // date column. Across a mixed row the values are just values, so a horizontal
+    // fill can never invent dates out of a number column that sits beside one.
+    const single = types.size === 1 ? [...types][0] : undefined
+    return inferSeries(values, { type: single })
   }
 
   // Copy one source cell onto one target cell, appending to the patch.
@@ -557,10 +620,46 @@ export function CellSelectionProvider<T extends RowData>({
     formulaPatches.push(formulaPatch(targetIndex, targetColumnId, undefined))
   }
 
+  // Write one EXTRAPOLATED value onto a target cell. Same type discipline as
+  // `fillCell` — verbatim within a column, re-read through the target column's
+  // type across columns — but there is no source cell to carry anything else
+  // from, so any formula sitting on the target is dropped.
+  const fillSeriesCell = (
+    value: unknown,
+    sourceColumnId: string,
+    targetIndex: number,
+    targetColumnId: string,
+    cells: CellPatch[],
+    formulaPatches: FormulaPatch[],
+  ) => {
+    // Defensive: `inferSeries` never steps an object, but the plan hands back
+    // source values verbatim inside the block.
+    if (value !== null && typeof value === 'object') return
+
+    const after =
+      sourceColumnId === targetColumnId
+        ? (value ?? '')
+        : parseTypedValue(
+            value === null || value === undefined ? '' : String(value),
+            columnOptions(targetColumnId),
+            dataRows()[targetIndex]?.[targetColumnId],
+          )
+
+    cells.push(cellPatch(targetIndex, targetColumnId, after))
+    formulaPatches.push(formulaPatch(targetIndex, targetColumnId, undefined))
+  }
+
   // Fill from the selection to wherever the handle was dragged. The filled
   // area is the bounding box of the selection and the drag target, so dragging
   // sideways fills across, and dragging diagonally fills both axes at once.
-  const applyFill = (target: CellPos | null, source: CellRect | null) => {
+  //
+  // `copy` forces the old behaviour — repeat the block — for the Ctrl modifier
+  // and for Ctrl+D / Ctrl+R, which are copy gestures in every spreadsheet.
+  const applyFill = (
+    target: CellPos | null,
+    source: CellRect | null,
+    { copy = false }: { copy?: boolean } = {},
+  ) => {
     if (!source || !target) return
 
     const area: CellRect = {
@@ -580,13 +679,35 @@ export function CellSelectionProvider<T extends RowData>({
     const cells: CellPatch[] = []
     const formulaPatches: FormulaPatch[] = []
 
+    // Which axis the series runs along. Growing up or down makes every COLUMN of
+    // the block a series; growing only sideways makes every ROW one. A diagonal
+    // drag is read as vertical — a drag that went down as well as across is
+    // nearly always "continue this column, and copy it sideways".
+    const axis: 'row' | 'col' =
+      area.top !== source.top || area.bottom !== source.bottom ? 'row' : 'col'
+
+    // One plan per line, inferred on first use and reused for every cell that
+    // line feeds — a 1000-row fill infers once per column, not once per cell.
+    const plans = new Map<number, SeriesPlan | null>()
+    const planFor = (line: number): SeriesPlan | null => {
+      if (copy) return null
+      if (!plans.has(line)) {
+        plans.set(
+          line,
+          axis === 'row'
+            ? seriesPlanForColumn(source, line)
+            : seriesPlanForRow(source, line),
+        )
+      }
+      return plans.get(line) ?? null
+    }
+
     for (let r = area.top; r <= area.bottom; r++) {
       const targetIndex = dataIndexAt(r)
       // Grouped (aggregate) rows have no backing data row.
       if (targetIndex < 0) continue
-      const sourceIndex = dataIndexAt(
-        source.top + fillOffset(r, source.top, source.bottom),
-      )
+      const sourceRow = source.top + fillOffset(r, source.top, source.bottom)
+      const sourceIndex = dataIndexAt(sourceRow)
       if (sourceIndex < 0) continue
       const sourceRowIsTarget = r >= source.top && r <= source.bottom
 
@@ -596,10 +717,26 @@ export function CellSelectionProvider<T extends RowData>({
 
         const targetColumnId = columnIdAt(c)
         if (!targetColumnId || readOnly.has(targetColumnId)) continue
-        const sourceColumnId = columnIdAt(
-          source.left + fillOffset(c, source.left, source.right),
-        )
+        const sourceCol = source.left + fillOffset(c, source.left, source.right)
+        const sourceColumnId = columnIdAt(sourceCol)
         if (!sourceColumnId) continue
+
+        // A recognised pattern is extrapolated; everything else — pure text, a
+        // formula, a mixed block, or Ctrl held down — copies exactly as before.
+        const plan = planFor(axis === 'row' ? sourceCol : sourceRow)
+        if (plan && plan.kind !== 'copy') {
+          const position =
+            axis === 'row' ? r - source.top : c - source.left
+          fillSeriesCell(
+            plan.valueAt(position),
+            sourceColumnId,
+            targetIndex,
+            targetColumnId,
+            cells,
+            formulaPatches,
+          )
+          continue
+        }
 
         fillCell(
           sourceIndex,
@@ -632,6 +769,15 @@ export function CellSelectionProvider<T extends RowData>({
   anchorRef.current = anchor
   const fillTargetRef = React.useRef(fillTarget)
   fillTargetRef.current = fillTarget
+  // Mirrored into a ref so the once-installed window listeners can compare
+  // against the current value without re-rendering on every mousemove: the
+  // state (which drives the badge) is only touched when the mode actually flips.
+  const fillCopyRef = React.useRef(fillCopyMode)
+  const setFillCopy = (on: boolean) => {
+    if (fillCopyRef.current === on) return
+    fillCopyRef.current = on
+    setFillCopyMode(on)
+  }
   const editingRef = React.useRef(editing)
   editingRef.current = editing
   // The window listeners below are installed once, so they must not close over
@@ -640,16 +786,42 @@ export function CellSelectionProvider<T extends RowData>({
   applyFillRef.current = applyFill
 
   React.useEffect(() => {
-    const onMouseUp = () => {
+    const onMouseUp = (event: MouseEvent) => {
       const mode = dragMode.current
       dragMode.current = 'none'
       if (mode !== 'fill') return
-      applyFillRef.current(fillTargetRef.current, rectRef.current)
+      // The release is what decides: whatever Ctrl / Cmd is doing at THAT moment
+      // is the mode, so a user can change their mind mid-drag (and the preview
+      // badge has been telling them which one they would get).
+      applyFillRef.current(fillTargetRef.current, rectRef.current, {
+        copy: event.ctrlKey || event.metaKey,
+      })
       setFillTarget(null)
+      setFillCopy(false)
+    }
+
+    // While a fill drag is live, track the modifier from the mouse (every move
+    // event carries it) AND from the keyboard (for when the pointer is held
+    // still and only the key changes), so the badge never goes stale.
+    const onMouseMove = (event: MouseEvent) => {
+      if (dragMode.current !== 'fill') return
+      setFillCopy(event.ctrlKey || event.metaKey)
+    }
+    const onModifier = (event: KeyboardEvent) => {
+      if (dragMode.current !== 'fill') return
+      setFillCopy(event.ctrlKey || event.metaKey)
     }
 
     window.addEventListener('mouseup', onMouseUp)
-    return () => window.removeEventListener('mouseup', onMouseUp)
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('keydown', onModifier)
+    window.addEventListener('keyup', onModifier)
+    return () => {
+      window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('keydown', onModifier)
+      window.removeEventListener('keyup', onModifier)
+    }
   }, [])
 
   /* ------------------------------------------------------------ clipboard */
@@ -738,17 +910,53 @@ export function CellSelectionProvider<T extends RowData>({
     const formulaPatches: FormulaPatch[] = []
     const rowCount = rows().length
     const colCount = columnIds().length
-    // Clamped at the grid edges rather than wrapping or growing the table.
+    // Clamped at the grid edges rather than wrapping. The selection left behind
+    // can only cover rendered rows, so it stays clamped even when the sheet grew.
     const lastRow = Math.min(target.row + height - 1, rowCount - 1)
     const lastCol = Math.min(target.col + width - 1, colCount - 1)
 
+    // Rows the pasted block needs beyond the end of the sheet. Growing is only
+    // ever done by APPENDING: an appended row takes a data index past the end,
+    // so every existing index — and therefore every formula key and every undo
+    // patch, which are all positional — keeps meaning what it meant. Inserting
+    // in the middle would shift them, which is why `insertRow` in App has to
+    // clear both. Columns are NOT grown: that needs a schema edit, which is the
+    // host's business, so a block wider than the sheet still loses its overhang.
+    const baseLength = dataRows().length
+    const overflow = Math.max(0, target.row + height - rowCount)
+    const grow = meta()?.appendRows
+
+    // …and only when the last rendered row really is the last row of the sheet.
+    // "Past the bottom of the screen" is not "past the end of the data": with a
+    // filter or a grouping in play there are rows the view is deliberately
+    // hiding, and on any page but the last there are rows the paste should be
+    // flowing into rather than inventing. Both of those keep the old clamped
+    // behaviour, so growing can only ever add rows nobody was using.
+    const pagination = table.getState().pagination
+    const viewRows = table.getPrePaginationRowModel().rows
+    const pageOffset = (pagination?.pageIndex ?? 0) * (pagination?.pageSize ?? 0)
+    const atSheetEnd =
+      viewRows.length === baseLength && pageOffset + rowCount >= viewRows.length
+
+    const growing = overflow > 0 && typeof grow === 'function' && atSheetEnd
+    if (growing) grow!(overflow)
+
     for (let i = 0; i < height; i++) {
       const screenRow = target.row + i
-      if (screenRow >= rowCount) break
-      const targetIndex = dataIndexAt(screenRow)
-      // Grouped rows are skipped, keeping the block aligned with what is on
-      // screen rather than shifting everything below them up by one.
-      if (targetIndex < 0) continue
+      let targetIndex: number
+      if (screenRow < rowCount) {
+        targetIndex = dataIndexAt(screenRow)
+        // Grouped rows are skipped, keeping the block aligned with what is on
+        // screen rather than shifting everything below them up by one.
+        if (targetIndex < 0) continue
+      } else {
+        if (!growing) break
+        // Past the last rendered row: the rows just appended, in order. They are
+        // addressed by DATA index because a sorted / filtered / paginated view
+        // will not necessarily render them at the bottom — or at all, until the
+        // user pages to them.
+        targetIndex = baseLength + (screenRow - rowCount)
+      }
 
       for (let j = 0; j < width; j++) {
         const screenCol = target.col + j
@@ -1045,6 +1253,43 @@ export function CellSelectionProvider<T extends RowData>({
     }
   }
 
+  // Ctrl+D / Ctrl+R. With a range selected, its first row / first column is the
+  // source and the rest of the range is filled from it. With a single cell (or a
+  // single row / column) there is nothing inside the selection to fill FROM, so
+  // the source is the cell above / to the left — which is what a spreadsheet
+  // does, and what makes Ctrl+D useful without selecting a range first.
+  //
+  // Both COPY rather than extrapolate: in every spreadsheet Ctrl+D means "make
+  // this the same as the one above". Continuing a series is the drag handle's
+  // job, where the preview shows you what you are about to get.
+  const fillFromEdge = (direction: 'down' | 'right') => {
+    const current = rectRef.current
+    if (!current) return
+
+    const source: CellRect =
+      direction === 'down'
+        ? current.bottom > current.top
+          ? { ...current, bottom: current.top }
+          : { ...current, top: current.top - 1, bottom: current.top - 1 }
+        : current.right > current.left
+          ? { ...current, right: current.left }
+          : { ...current, left: current.left - 1, right: current.left - 1 }
+
+    if (source.top < 0 || source.left < 0) return
+    // A borrowed source column must still be a real, selectable column.
+    const sourceColumnId = columnIdAt(source.left)
+    if (!sourceColumnId || skip.has(sourceColumnId)) return
+
+    applyFill({ row: current.bottom, col: current.right }, source, {
+      copy: true,
+    })
+    // `applyFill` leaves the whole filled AREA selected, which for a borrowed
+    // source would swallow the row above / column to the left. Excel keeps the
+    // selection the user made, so put it back.
+    setAnchor({ row: current.top, col: current.left })
+    setFocus({ row: current.bottom, col: current.right })
+  }
+
   const stopEditing = (move?: 'down' | 'right') => {
     const at = editingRef.current
     setEditing(null)
@@ -1173,6 +1418,15 @@ export function CellSelectionProvider<T extends RowData>({
           // Deliberately no preventDefault: the native `paste` event is the
           // path that needs no clipboard permission.
           pasteFromClipboard(anchor)
+          return
+        }
+        // Fill down / fill right. Both need preventDefault before anything else
+        // sees them — Ctrl+D is the browser's bookmark and Ctrl+R its reload —
+        // so they are gated on the grid owning focus, and left entirely alone
+        // when it does not.
+        if ((key === 'd' || key === 'r') && rectRef.current && navAllowed()) {
+          event.preventDefault()
+          fillFromEdge(key === 'd' ? 'down' : 'right')
           return
         }
         // Select-all the grid — but only when the grid, not a toolbar control,
@@ -1380,6 +1634,21 @@ export function CellSelectionProvider<T extends RowData>({
     return grew ? preview : null
   })()
 
+  // What releasing the handle RIGHT NOW would do — 'Series' or 'Copy'. Ctrl
+  // forces a copy; otherwise it is whatever the block's leading line infers, so
+  // the badge tells the truth even for text (which has no series to continue)
+  // rather than promising something the fill cannot deliver.
+  const fillModeLabel: string | null = (() => {
+    if (!fillPreview || !rect) return null
+    if (fillCopyMode) return 'Copy'
+    const vertical =
+      fillPreview.top !== rect.top || fillPreview.bottom !== rect.bottom
+    const plan = vertical
+      ? seriesPlanForColumn(rect, rect.left)
+      : seriesPlanForRow(rect, rect.top)
+    return describeSeries(plan?.kind ?? 'copy')
+  })()
+
   const renderDecoration = (pos: CellPos): React.ReactNode => {
     if (!rect) return null
 
@@ -1445,9 +1714,43 @@ export function CellSelectionProvider<T extends RowData>({
             borderRight: edge(!inSelection(pos.row, pos.col + 1)),
           }
 
+    // The mode badge rides the far corner of the drag preview — the cell under
+    // the pointer — so "Series" / "Copy" is readable without looking away from
+    // what is being filled. Inside the cell rather than outside it: the last
+    // row / column of a preview is often at the edge of the scroll container,
+    // and a chip hanging past it would be clipped exactly when it matters.
+    const showModeBadge =
+      previewed &&
+      !!fillModeLabel &&
+      pos.row === fillPreview!.bottom &&
+      pos.col === fillPreview!.right
+
     return (
       <>
         <div style={style} />
+        {showModeBadge ? (
+          <div
+            data-testid="fill-mode-badge"
+            style={{
+              position: 'absolute',
+              right: '2px',
+              bottom: '2px',
+              zIndex: 5,
+              pointerEvents: 'none',
+              padding: '0 4px',
+              borderRadius: '3px',
+              border: `1px solid ${ACTIVE_COLOR}`,
+              background: '#ffffff',
+              color: ACTIVE_COLOR,
+              fontSize: '10px',
+              lineHeight: '14px',
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {fillModeLabel}
+          </div>
+        ) : null}
         {selected && isHandleCell && !editing ? (
           <FillHandle onFillStart={startFill} onFillToBottom={fillToBottom} />
         ) : null}

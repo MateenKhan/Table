@@ -302,13 +302,23 @@ export const App = ({
   const onCellChangeRef = React.useRef(onCellChange)
   onCellChangeRef.current = onCellChange
 
+  // Appending rows needs the current schema, which is declared much further down
+  // (`customColumns`), so the callback is reached through a ref: `tableMeta`
+  // itself has to stay one memoised instance for the life of the table.
+  const appendRowsRef = React.useRef<(count: number) => void>(() => {})
+
   // One instance for the life of the table: the undo stacks are keyed to the
   // rows currently in `data`, and `updateCells` is how a patch is replayed.
   const tableMeta = React.useMemo(
-    () =>
-      getTableMeta(setData, skipAutoResetPageIndex, (rowIndex, columnId, value) =>
+    () => ({
+      ...getTableMeta(setData, skipAutoResetPageIndex, (rowIndex, columnId, value) =>
         onCellChangeRef.current?.(rowIndex, columnId, value),
       ),
+      // How the grid grows the sheet when a paste is taller than it. Optional
+      // as far as the grid is concerned — see the note on `meta()` in
+      // `useCellSelection`.
+      appendRows: (count: number) => appendRowsRef.current(count),
+    }),
     [skipAutoResetPageIndex],
   )
 
@@ -535,6 +545,33 @@ export const App = ({
       return [...rows, row as unknown as Person]
     })
   }, [customColumns])
+
+  // Append `count` blank rows at the END of the sheet. This is what lets a paste
+  // grow the grid instead of silently dropping the rows that would not fit.
+  //
+  // Appending is the ONLY structural row edit that can happen silently: every
+  // existing row keeps its data index, so formulas and the undo history — both
+  // keyed by index — stay valid and are deliberately NOT cleared here. Insert,
+  // delete and reorder all have to clear them (see `insertRow` / `deleteRows`),
+  // which is exactly why paste grows downwards and never inserts.
+  const appendRows = React.useCallback(
+    (count: number) => {
+      if (count <= 0) return
+      // Adding rows must not bounce the user back to page 1 mid-paste — that
+      // would wipe the (screen-coordinate) selection out from under them.
+      skipAutoResetPageIndex()
+      setData((rows) => {
+        const ids = customColumns ? customColumns.map((c) => String(c.id)) : null
+        const extra: Person[] = []
+        for (let i = 0; i < count; i++) {
+          extra.push((ids ? blankRow(ids) : {}) as unknown as Person)
+        }
+        return [...rows, ...extra]
+      })
+    },
+    [customColumns, skipAutoResetPageIndex],
+  )
+  appendRowsRef.current = appendRows
 
   const deleteRows = React.useCallback(
     (rowIndices: number[]) => {

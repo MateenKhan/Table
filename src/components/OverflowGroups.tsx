@@ -122,6 +122,16 @@ export default function OverflowGroups({ children, className = '' }: Props) {
       const target = e.target as Node
       if (moreRef.current?.contains(target)) return
       if (menuRef.current?.contains(target)) return
+      // A group inside the menu may portal its own popover OUT to <body> — the
+      // border picker, the column-type listbox, the number-format panel, the
+      // strip menus. Those are logically inside the menu even though they are
+      // not DOM descendants of it, so a click in one must not dismiss it.
+      // Without this the menu closed on the FIRST click into any of them: the
+      // action still applied, but adjusting anything in more than one step
+      // meant reopening the menu each time.
+      const el =
+        target instanceof Element ? target : (target as ChildNode).parentElement
+      if (el?.closest('[data-popover-portal]')) return
       setMenuOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {

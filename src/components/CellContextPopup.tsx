@@ -11,6 +11,7 @@ import {
   ArrowUpToLine,
   Baseline,
   Ban,
+  Bold,
   Check,
   ChevronDown,
   Combine,
@@ -18,6 +19,7 @@ import {
   EyeOff,
   FunctionSquare,
   Group,
+  Italic,
   PaintBucket,
   Pin,
   PinOff,
@@ -26,12 +28,14 @@ import {
   Sigma,
   SlidersHorizontal,
   Trash2,
+  Underline,
   Ungroup,
 } from 'lucide-react'
 import {
   Align,
   Borders,
   Format,
+  TextStyleKey,
   tableFormatting,
   useFormatVersion,
 } from '../formatting'
@@ -40,6 +44,7 @@ import {
   resolveColumnMeta,
   useColumnTypeOverridesVersion,
 } from '../columnTypeOverrides'
+import { isAttachmentType, type TypeOptions } from '../columnTypes'
 import { getColumnTypePreset } from '../columnTypeRegistry'
 import { lettersForColumnId } from '../columnOrder'
 import { useCellSelection } from '../useCellSelection'
@@ -47,6 +52,7 @@ import type { SelectionScope } from '../useCellSelection'
 import ColorPickerButton from './ColorPickerButton'
 import ColumnTypePicker from './ColumnTypePicker'
 import BorderControl from './BorderControl'
+import NumberFormatControl from './NumberFormatControl'
 import OverflowGroups from './OverflowGroups'
 
 // An INLINE contextual operations strip for the current selection. It used to be
@@ -194,6 +200,20 @@ const ALIGNMENTS: { value: Align; label: string }[] = [
   { value: 'left', label: 'Align left' },
   { value: 'center', label: 'Align centre' },
   { value: 'right', label: 'Align right' },
+]
+
+// Character formatting, as data so the toggle descriptors, their tooltips and
+// the Ctrl+B/I/U handler below all read from one list. `shortcut` is only ever
+// shown to the user — the handler matches on the letter, not on this string.
+const TEXT_STYLES: {
+  key: TextStyleKey
+  label: string
+  shortcut: string
+  icon: LucideIcon
+}[] = [
+  { key: 'bold', label: 'Bold', shortcut: 'Ctrl+B', icon: Bold },
+  { key: 'italic', label: 'Italic', shortcut: 'Ctrl+I', icon: Italic },
+  { key: 'underline', label: 'Underline', shortcut: 'Ctrl+U', icon: Underline },
 ]
 
 // Nothing selected. A module-level constant so the fallback below never creates
@@ -558,6 +578,12 @@ function StripMenu({
               ref={panelRef}
               role="menu"
               aria-label={ariaLabel}
+              // Marks this as a portaled popover, the way BorderControl /
+              // ColumnTypePicker / NumberFormatControl already do. An ancestor
+              // popover's outside-close handler can then treat a click in here
+              // as "inside", which is what keeps a menu opened from inside the
+              // strip's "⋮" overflow from dismissing the overflow underneath it.
+              data-popover-portal=""
               className="fixed z-[100] min-w-[12rem] max-w-[16rem] rounded-lg border border-slate-200 bg-white p-1 text-sm text-slate-700 shadow-lg"
               style={{
                 left: pos?.left ?? 0,
@@ -727,6 +753,79 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
   const setFontFamily = (fontFamily?: string) =>
     scopeKeys.forEach((k) => tableFormatting.update(k, { fontFamily }))
 
+  // ── Character formatting ───────────────────────────────────────────────────
+  // Toggling reads the FIRST scope key's stored value and writes the opposite to
+  // every key, which is how the alignment buttons and the colour swatches have
+  // always behaved here: one click makes the whole selection agree instead of
+  // each scope flipping independently (a per-scope flip on a 40-cell range gives
+  // a checkerboard). `undefined` is the clear — see `Format`'s present-or-absent
+  // note in formatting.ts.
+  const toggleTextStyle = (key: TextStyleKey) => {
+    const next = format[key] ? undefined : true
+    scopeKeys.forEach((k) => tableFormatting.update(k, { [key]: next }))
+  }
+
+  // Ctrl/⌘+B / I / U. Bound HERE rather than in the grid's own key handler for
+  // two reasons: this component is the only thing that knows which scope keys a
+  // character style has to be written through, and the strip is mounted exactly
+  // when there is a selection — which is exactly when the shortcuts mean
+  // anything. The guards mirror `useCellSelection`'s: an event aimed at a form
+  // control (the cell editor, the query box, a toolbar select) belongs to that
+  // control. Swallowing the event matters for Ctrl+U in particular, which the
+  // browser would otherwise take as "view source".
+  const toggleRef = React.useRef(toggleTextStyle)
+  toggleRef.current = toggleTextStyle
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.altKey || event.shiftKey) return
+      const pressed = event.key.toLowerCase()
+      const style = TEXT_STYLES.find(
+        (entry) => entry.shortcut.slice(-1).toLowerCase() === pressed,
+      )
+      if (!style) return
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      if (target?.isContentEditable) return
+      event.preventDefault()
+      toggleRef.current(style.key)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  // ── Number format targets ──────────────────────────────────────────────────
+  // Number format is a per-COLUMN, value-presentation concern (see the ownership
+  // note at the top of formatting.ts), so the picker's targets are the columns
+  // the selection touches — whatever shape the selection itself is. Attachment
+  // and mixed columns are dropped: "2 decimal places" on an image column is not
+  // a formatting choice, it is a way to lose the images.
+  const numberFormatTargets: { id: string; meta: TypeOptions }[] = table
+    ? scope.columnIds
+        .map((id) => ({
+          id,
+          meta: resolveColumnMeta(id, table.getColumn(id)?.columnDef.meta),
+        }))
+        .filter(
+          (target) =>
+            !isAttachmentType(target.meta.type) && target.meta.type !== 'mixed',
+        )
+    : []
+
+  // Each column is re-formatted from its OWN resolved meta, so a change made
+  // across a mixed selection is a delta rather than a wholesale retype — see
+  // NumberFormatControl for why that matters.
+  const applyNumberFormat = (
+    build: (meta: TypeOptions) => string | null | undefined,
+  ) => {
+    for (const target of numberFormatTargets) {
+      const next = build(target.meta)
+      if (next === undefined) continue
+      columnTypeOverrides.set(target.id, next)
+    }
+  }
+
   // ── Column operations (the removed "Columns" dropdown's job) ───────────────
   const sorted = column?.getIsSorted() // false | 'asc' | 'desc'
   const pinned = column?.getIsPinned() // false | 'left' | 'right'
@@ -819,6 +918,37 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
         />
       ),
     },
+    ...TEXT_STYLES.map<StripAction>(({ key, label, shortcut, icon: Icon }, index) => ({
+      id: `text-${key}`,
+      label: `${label} (${shortcut})`,
+      group: 'format',
+      // Always meaningful: every selection shape has text in it, and unlike the
+      // number format there is no column type that makes bold nonsensical.
+      applies: () => true,
+      dividerBefore: index === 0,
+      render: () => {
+        // Reads the STORED format for the first scope key, not the resolved one,
+        // so the pressed state answers "did I set this here?" — the same
+        // question every other active state on this strip answers.
+        const active = !!format[key]
+        return (
+          <button
+            type="button"
+            title={`${label} (${shortcut})`}
+            aria-label={label}
+            aria-pressed={active}
+            className={`icon-btn-sm border ${
+              active
+                ? 'border-accent-300 bg-accent-500/10 text-accent-600'
+                : 'border-slate-300 text-slate-600 sm:hover:bg-slate-100'
+            }`}
+            onClick={() => toggleTextStyle(key)}
+          >
+            <Icon size={16} aria-hidden="true" />
+          </button>
+        )
+      },
+    })),
     ...ALIGNMENTS.map<StripAction>(({ value, label }, index) => ({
       id: `align-${value}`,
       label,
@@ -887,6 +1017,22 @@ export function CellContextStrip<T extends RowData>(props: Props<T>) {
             </option>
           ))}
         </select>
+      ),
+    },
+    {
+      id: 'number-format',
+      label: 'Number format',
+      group: 'format',
+      // Needs at least one column whose values can carry a numeric / date
+      // format. A selection of nothing but image columns simply doesn't get it.
+      applies: () => numberFormatTargets.length > 0,
+      dividerBefore: true,
+      render: () => (
+        <NumberFormatControl
+          current={numberFormatTargets[0].meta}
+          columnCount={numberFormatTargets.length}
+          onApply={applyNumberFormat}
+        />
       ),
     },
     {

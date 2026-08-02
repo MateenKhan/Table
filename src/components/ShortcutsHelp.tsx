@@ -45,6 +45,21 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
       { keys: ['A…Z', '0…9'], label: 'Start typing to overwrite the cell' },
       { keys: ['Esc'], label: 'Cancel editing, clear selection, or close a preview' },
       { keys: ['Delete', 'Backspace'], label: 'Clear the selected cells' },
+      {
+        keys: ['Ctrl', 'D'],
+        label: 'Fill down from the top row of the selection',
+      },
+      {
+        keys: ['Ctrl', 'R'],
+        label: 'Fill right from the left column of the selection',
+      },
+      {
+        keys: ['Ctrl', 'Drag'],
+        label: 'Fill handle: switch between continuing a series and copying',
+      },
+      { keys: ['Ctrl', 'B'], label: 'Bold the selection' },
+      { keys: ['Ctrl', 'I'], label: 'Italicise the selection' },
+      { keys: ['Ctrl', 'U'], label: 'Underline the selection' },
     ],
   },
   {

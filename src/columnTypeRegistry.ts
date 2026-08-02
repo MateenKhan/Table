@@ -13,7 +13,7 @@
 // registry, so the id is the durable handle the rest of the app stores.
 
 import React from 'react'
-import type { ColumnType, TypeOptions } from './columnTypes'
+import { isDateType, type ColumnType, type TypeOptions } from './columnTypes'
 
 export type ColumnTypePreset = {
   id: string
@@ -111,6 +111,221 @@ export const BUILTIN_PRESETS: readonly ColumnTypePreset[] = [
   unit('unit-l', 'Liters', 'L'),
   unit('unit-ml', 'Milliliters', 'ml'),
 ]
+
+/* ------------------------------------------------- synthesised format presets */
+//
+// The ops strip's number-format picker (currency / percentage / decimal places /
+// thousands separator / date pattern) needs to record a per-column choice. It
+// records it as a preset id, like everything else here — but the ids are
+// SYNTHESISED from a grammar rather than looked up in a fixed catalogue, and
+// they never appear in `list()` (they are a formatting choice, not a "kind of
+// column", and 4 × 7 × 2 combinations would drown the type menu).
+//
+// Why an id and not an inline `TypeOptions` patch, which `columnTypeOverrides`
+// also accepts: the inline path runs through that store's `sanitizeOptions`
+// whitelist, which by design drops fields it has never heard of — including
+// `useGrouping`, so "no thousands separator" would silently not survive a
+// reload. A preset id is stored verbatim and re-resolved through `get()` here,
+// so the option set is defined in ONE place (this file) and round-trips through
+// localStorage, format profiles and shared snapshots without any of them
+// needing to know the field exists.
+//
+// The grammar, `|`-separated so it stays readable in devtools:
+//   fmt|num|<decimals>|<g|n>||<uriEncodedSuffix>     plain / percent / unit
+//   fmt|cur|<decimals>|<g|n>|<ISO4217>|<uriEncodedSuffix>
+//   fmt|date|<patternKey>      fmt|datetime|<patternKey>
+// e.g. `fmt|num|1|g||%25` is "1 dp, grouped, % suffix" — a percentage.
+
+const FORMAT_ID_PREFIX = 'fmt|'
+
+/** Decimal places a format preset may ask for. Matches the registry's 0‥6 clamp. */
+export const MIN_DECIMALS = 0
+export const MAX_DECIMALS = 6
+
+/** The currencies the picker offers. `code` is what Intl.NumberFormat is given. */
+export const CURRENCY_OPTIONS: readonly { code: string; label: string }[] = [
+  { code: 'USD', label: 'USD $' },
+  { code: 'EUR', label: 'EUR €' },
+  { code: 'GBP', label: 'GBP £' },
+  { code: 'INR', label: 'INR ₹' },
+  { code: 'JPY', label: 'JPY ¥' },
+  { code: 'AUD', label: 'AUD $' },
+  { code: 'CAD', label: 'CAD $' },
+  { code: 'CHF', label: 'CHF' },
+  { code: 'CNY', label: 'CNY ¥' },
+]
+
+/**
+ * Date patterns offered by the picker, keyed rather than embedded in the id: a
+ * date-fns pattern contains spaces and colons, and a fixed key set keeps the id
+ * grammar unambiguous AND keeps a stored/pasted id from smuggling an arbitrary
+ * format string into `formatDate`.
+ */
+export const DATE_FORMAT_PATTERNS: readonly {
+  key: string
+  label: string
+  date: string
+  datetime: string
+}[] = [
+  { key: 'iso', label: '2026-08-02', date: 'yyyy-MM-dd', datetime: 'yyyy-MM-dd HH:mm' },
+  { key: 'us', label: '08/02/2026', date: 'MM/dd/yyyy', datetime: 'MM/dd/yyyy HH:mm' },
+  { key: 'eu', label: '02/08/2026', date: 'dd/MM/yyyy', datetime: 'dd/MM/yyyy HH:mm' },
+  { key: 'dot', label: '02.08.2026', date: 'dd.MM.yyyy', datetime: 'dd.MM.yyyy HH:mm' },
+  { key: 'medium', label: '2 Aug 2026', date: 'd MMM yyyy', datetime: 'd MMM yyyy HH:mm' },
+  { key: 'long', label: '2 August 2026', date: 'd MMMM yyyy', datetime: "d MMMM yyyy HH:mm" },
+  { key: 'day', label: 'Sun, 2 Aug 2026', date: 'EEE, d MMM yyyy', datetime: 'EEE, d MMM yyyy HH:mm' },
+  { key: 'us12', label: '08/02/2026 1:30 PM', date: 'MM/dd/yyyy', datetime: 'MM/dd/yyyy h:mm a' },
+]
+
+/**
+ * The number-format choice, as the picker thinks about it. `suffix` is carried
+ * through unchanged by the decimals / separator controls, so bumping the decimal
+ * places on a "Kilograms" column keeps its `kg` — the picker adjusts the column's
+ * format instead of replacing its type, which is the whole point of building the
+ * id from the column's own resolved meta.
+ */
+export type NumberFormatSpec = {
+  style: 'num' | 'cur'
+  decimals: number
+  grouping: boolean
+  currency: string
+  suffix: string
+}
+
+const clampDecimals = (n: number): number =>
+  Math.min(MAX_DECIMALS, Math.max(MIN_DECIMALS, Math.trunc(n)))
+
+/**
+ * Read a column's CURRENT number format off its resolved meta, so every control
+ * in the picker is a delta on what the column already is rather than a reset to
+ * some default. Non-numeric columns (text, and anything else the picker is
+ * willing to convert) read as a plain grouped 1-dp number.
+ */
+export function numberFormatSpecFromMeta(meta: TypeOptions | undefined): NumberFormatSpec {
+  const type = meta?.type
+  return {
+    style: type === 'currency' ? 'cur' : 'num',
+    decimals: clampDecimals(
+      meta?.decimals ??
+        (type === 'currency' ? 2 : type === 'number' ? 0 : 1),
+    ),
+    grouping: meta?.useGrouping !== false,
+    currency: meta?.currency || 'USD',
+    suffix: meta?.suffix ?? '',
+  }
+}
+
+/** The durable id for a number-format spec. */
+export function numberFormatPresetId(spec: NumberFormatSpec): string {
+  return [
+    'fmt',
+    spec.style,
+    String(clampDecimals(spec.decimals)),
+    spec.grouping ? 'g' : 'n',
+    spec.style === 'cur' ? spec.currency : '',
+    encodeURIComponent(spec.suffix),
+  ].join('|')
+}
+
+/** The durable id for a date-pattern choice. */
+export function dateFormatPresetId(
+  type: 'date' | 'datetime',
+  patternKey: string,
+): string {
+  return `fmt|${type}|${patternKey}`
+}
+
+/** Which date pattern a resolved meta is currently using, or '' when it is custom. */
+export function dateFormatKeyFromMeta(meta: TypeOptions | undefined): string {
+  if (!isDateType(meta?.type) || !meta?.dateFormat) return ''
+  const field = meta.type === 'datetime' ? 'datetime' : 'date'
+  return DATE_FORMAT_PATTERNS.find((p) => p[field] === meta.dateFormat)?.key ?? ''
+}
+
+// A readable name for a synthesised preset. It is what the ops strip's "Type"
+// trigger shows once a column carries a format id, so it has to say enough to
+// identify the format without the user opening the picker.
+function numberFormatLabel(spec: NumberFormatSpec): string {
+  const parts: string[] = [
+    spec.style === 'cur' ? `Currency (${spec.currency})` : 'Number',
+    `${spec.decimals} dp`,
+  ]
+  if (spec.suffix) parts.push(spec.suffix)
+  if (!spec.grouping) parts.push('no separator')
+  return parts.join(' · ')
+}
+
+/**
+ * Resolve a synthesised `fmt|…` id back into a preset, or `null` when it is not
+ * one / is malformed. Everything is re-validated on the way out: decimals are
+ * clamped, the currency has to look like an ISO code, the date pattern has to be
+ * a key we published. A hand-edited storage entry therefore degrades to "no
+ * override", never to an arbitrary format string reaching `Intl` / `date-fns`.
+ */
+function synthesiseFormatPreset(id: string): ColumnTypePreset | null {
+  if (!id.startsWith(FORMAT_ID_PREFIX)) return null
+  const parts = id.split('|')
+  const kind = parts[1]
+
+  if (kind === 'date' || kind === 'datetime') {
+    const pattern = DATE_FORMAT_PATTERNS.find((p) => p.key === parts[2])
+    if (!pattern) return null
+    const dateFormat = kind === 'datetime' ? pattern.datetime : pattern.date
+    return {
+      id,
+      label: `${kind === 'datetime' ? 'Date & time' : 'Date'} · ${pattern.label}`,
+      group: 'Format',
+      type: kind,
+      options: { type: kind, dateFormat },
+      builtin: true,
+    }
+  }
+
+  if (kind !== 'num' && kind !== 'cur') return null
+  if (parts.length < 6) return null
+
+  const decimalsRaw = Number(parts[2])
+  if (!Number.isFinite(decimalsRaw)) return null
+  const currency = parts[4]
+  if (kind === 'cur' && !/^[A-Za-z]{3}$/.test(currency)) return null
+
+  let suffix = ''
+  try {
+    // A malformed percent-escape throws; treat it as "no suffix" rather than
+    // discarding an otherwise perfectly good format.
+    suffix = decodeURIComponent(parts.slice(5).join('|'))
+  } catch {
+    suffix = ''
+  }
+
+  const spec: NumberFormatSpec = {
+    style: kind,
+    decimals: clampDecimals(decimalsRaw),
+    grouping: parts[3] !== 'n',
+    currency: currency.toUpperCase(),
+    suffix,
+  }
+
+  // `decimal` (not `number`) even at 0 dp: `number` TRUNCATES on both display
+  // and re-entry, so "0 decimal places" would quietly turn 2.7 into 2 instead of
+  // showing 3. Rounding is what a spreadsheet's decimal control does.
+  const options: TypeOptions = {
+    type: spec.style === 'cur' ? 'currency' : 'decimal',
+    decimals: spec.decimals,
+    useGrouping: spec.grouping,
+    suffix: spec.suffix,
+  }
+  if (spec.style === 'cur') options.currency = spec.currency
+
+  return {
+    id,
+    label: numberFormatLabel(spec),
+    group: 'Format',
+    type: options.type!,
+    options,
+    builtin: true,
+  }
+}
 
 /* ------------------------------------------------------------ custom store */
 
@@ -235,13 +450,21 @@ class ColumnTypeRegistry {
     ]
   }
 
-  /** Look one preset up by id (built-in or custom). */
+  /**
+   * Look one preset up by id: built-in, custom, or — last — synthesised from the
+   * `fmt|…` grammar. Synthesised presets are resolvable but not listable, which
+   * is exactly the asymmetry the number-format picker needs: every consumer that
+   * turns a stored id into `TypeOptions` (`resolveMeta`, the strip's type label)
+   * goes through here and just works, while the type MENU stays the short list
+   * of column kinds a user actually picks between.
+   */
   get(id: string): ColumnTypePreset | undefined {
     this.ensureLoaded()
     const builtin = BUILTIN_PRESETS.find((p) => p.id === id)
     if (builtin) return { ...builtin, options: { ...builtin.options } }
     const custom = this.customs.get(id)
-    return custom ? { ...custom, options: { ...custom.options } } : undefined
+    if (custom) return { ...custom, options: { ...custom.options } }
+    return synthesiseFormatPreset(id) ?? undefined
   }
 
   /**

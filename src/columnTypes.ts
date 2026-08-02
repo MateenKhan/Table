@@ -4,6 +4,17 @@ import { format as formatDate, parse as parseDate, parseISO, isValid } from 'dat
 // The column type system. Every column declares what kind of value it holds
 // through TanStack's `meta`, and that single declaration drives formatting,
 // alignment, which editor is used and what the editor will accept.
+//
+// ── This file owns VALUE presentation ────────────────────────────────────────
+// `TypeOptions` is the whole of "what the cell's text says": decimal places, the
+// currency, the thousands separator, a unit suffix, the date pattern. The
+// per-scope `tableFormatting` store owns "how that text looks" (fill, ink,
+// borders, font, bold/italic/underline) and nothing else. The one property they
+// both have an opinion about is alignment, and there the stored `Format.align`
+// wins over `alignmentFor(type)` — a type default is a guess, a stored align is
+// a request. The full statement of the split, and why the number-format picker
+// writes HERE (per column) rather than into the format store, is at the top of
+// `formatting.ts`; this comment exists so nobody has to find that one first.
 export type ColumnType =
   | 'text'
   | 'number'
@@ -25,6 +36,15 @@ export type TypeOptions = {
   locale?: string
   // Appended to the formatted value, e.g. '%'.
   suffix?: string
+  // Numeric types: draw the locale's thousands separator (1,234.50) or not
+  // (1234.50). Defaults to ON, which is what every numeric column did before
+  // this option existed, so an absent value is the historical behaviour.
+  //
+  // Only the ops strip's number-format picker sets this, and it does so through
+  // a synthesised registry preset id (see `columnTypeRegistry`) rather than an
+  // inline options patch — which is also why it does not need a case in
+  // `columnTypeOverrides.sanitizeOptions`.
+  useGrouping?: boolean
   // `file` / `image`: the file picker's `accept` attribute.
   accept?: string
   // `file` / `image`: max accepted upload size in BYTES for this column. When a
@@ -137,11 +157,16 @@ export function formatCellValue(
 
   const locale = options?.locale ?? 'en-US'
   const suffix = options?.suffix ?? ''
+  // Absent = grouped, i.e. exactly what every numeric column did before the
+  // option existed. Only an explicit `false` turns the separator off.
+  const useGrouping = options?.useGrouping !== false
 
   if (type === 'number') {
     return (
-      getFormatter(locale, { maximumFractionDigits: 0 }).format(Math.trunc(n)) +
-      suffix
+      getFormatter(locale, {
+        maximumFractionDigits: 0,
+        useGrouping,
+      }).format(Math.trunc(n)) + suffix
     )
   }
 
@@ -154,6 +179,7 @@ export function formatCellValue(
         currency: options?.currency ?? 'USD',
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals,
+        useGrouping,
       }).format(n) + suffix
     )
   }
@@ -162,6 +188,7 @@ export function formatCellValue(
     getFormatter(locale, {
       minimumFractionDigits: decimals,
       maximumFractionDigits: decimals,
+      useGrouping,
     }).format(n) + suffix
   )
 }

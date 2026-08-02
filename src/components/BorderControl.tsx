@@ -305,6 +305,13 @@ export function BorderControl({ onApply, currentBorders }: BorderControlProps) {
               ref={panelRef}
               role="dialog"
               aria-label="Borders"
+              // Marks this panel as logically-inside whatever opened it, even
+              // though the portal makes it a child of <body>. Any outside-click
+              // handler that would otherwise dismiss its opener checks for this
+              // — see the same `closest('[data-popover-portal]')` guard below
+              // and in OverflowGroups, which is what keeps the "⋮" menu open
+              // while you adjust borders inside it.
+              data-popover-portal=""
               className="fixed z-[100] w-64 rounded-lg border border-slate-200 bg-white p-3 shadow-lg"
               style={{
                 left: pos?.left ?? 0,
