@@ -23,10 +23,13 @@
 //          reference (1-based data row) that shifts when the formula is
 //          filled; `age[$12]` is *absolute* and never shifts.
 //
-//   A1     `E1` is "the 5th data column, data row 1" - see `columnOrder.ts`
-//          for why letters are bound to definition order rather than to what
-//          is on screen. `$` anchors either half: `E1`, `$E$1`, `E$1`, `$E1`.
-//          The row half feeds the same fill translator as `age[12]`.
+//   A1     `E1` is "the 5th data column of the LIVE schema, data row 1" - see
+//          `columnOrder.ts` for the one letter space the header row and this
+//          engine share, and for why letters are bound to definition order
+//          rather than to what is on screen. `$` anchors either half: `E1`,
+//          `$E$1`, `E$1`, `$E1`. The row half feeds the same fill translator as
+//          `age[12]`. Letters that land past the end of the live schema are
+//          `#ERROR`, never a silent empty read.
 //
 // Both notations produce `ref` / `range` nodes; A1 ones additionally carry an
 // `a1` marker so the stringifier can round-trip the notation the user typed.
@@ -37,11 +40,12 @@
 
 import {
   ATTACHMENT_COLUMN_IDS,
-  DATA_COLUMN_IDS,
   DERIVED_COLUMNS,
+  LEGACY_LETTER_SPACE,
   columnIdAtIndex,
   columnLetters,
   isKnownColumnId,
+  letterSpaceLength,
   lettersToIndex,
 } from './columnOrder'
 import {
@@ -72,8 +76,8 @@ export type RowRef =
   | { mode: 'relative'; row: number }
   | { mode: 'absolute'; row: number }
 
-// The column half of an A1-style reference. `index` is a 0-based index into
-// `DATA_COLUMN_IDS`; it is kept even when out of range so the original text
+// The column half of an A1-style reference. `index` is a 0-based index into the
+// live letter space; it is kept even when out of range so the original text
 // still round-trips (evaluation is what reports `#ERROR`).
 export type ColRef = { index: number; absolute: boolean }
 
@@ -554,6 +558,160 @@ export function translateFormula(src: string, rowDelta: number, colDelta = 0): s
   return shifted === stringifyFormula(ast) ? src : shifted
 }
 
+/* ------------------------------------------------- legacy A1 migration */
+//
+// Making the letter space live is a BREAKING change for anything already saved.
+// Every sheet stored before it resolved its letters against one frozen list -
+// `LEGACY_LETTER_SPACE`, the demo schema. A user's own blank sheet has columns
+// `col1..colN`, so a stored `=C2` used to resolve to `lastName` (absent there,
+// read as empty, worth 0) and would now resolve to `col3` (a real column, worth
+// whatever the user typed). Same text, different answer, no warning: exactly the
+// class of silent change this whole fix exists to stop.
+//
+// So a payload stamped with an older version gets its A1 references rewritten,
+// once, on load. The rewrite is a straight retranslation through the OLD
+// mapping - `C` meant `lastName`, so say `lastName` - which pins the reference
+// to the column it always meant and makes the formula independent of any letter
+// space, now or later. Values come out identical: a named ref to a column that
+// is not there still reads empty, still 0.
+//
+// Built on the same parse -> rewrite -> stringify shape as `translateFormula`
+// above, and it shares its restraint: a formula that needs no rewrite is handed
+// back as the author's own text, byte for byte, never re-emitted.
+
+const legacyIdAt = (index: number): string =>
+  index >= 0 && index < LEGACY_LETTER_SPACE.length ? LEGACY_LETTER_SPACE[index] : ''
+
+// Does the legacy letter at `index` still name the same column in `live`?
+// When it does the reference already means what it always meant, so it is left
+// exactly as the user typed it - crucially, a sheet on the built-in schema is
+// untouched end to end and nobody's `=E1` turns into `age[1]` for no reason.
+const mappingUnchanged = (index: number, live: readonly string[]): boolean =>
+  live[index] === legacyIdAt(index)
+
+function migrateNode(node: FormulaNode, live: readonly string[]): FormulaNode {
+  switch (node.kind) {
+    case 'num':
+      return node
+
+    case 'ref': {
+      if (!node.a1) return node
+      const legacy = legacyIdAt(node.a1.index)
+      // Letters past the end of the old space were `#ERROR` then and are
+      // `#ERROR` now - there is nothing to pin them to, so keep the text.
+      if (!legacy) return node
+      if (mappingUnchanged(node.a1.index, live)) return node
+      // Drop the `a1` marker: this is now a named reference. The row half needs
+      // no translation - `E12` and `age[12]` already carry the same 1-based,
+      // relative-or-absolute row, and both shift identically under a fill.
+      return { kind: 'ref', col: legacy, row: node.row }
+    }
+
+    case 'range': {
+      if (!node.a1 || !node.a1To) return node
+      const lo = Math.min(node.a1.index, node.a1To.index)
+      const hi = Math.max(node.a1.index, node.a1To.index)
+
+      let unchanged = true
+      for (let c = lo; c <= hi; c++) {
+        if (!mappingUnchanged(c, live)) {
+          unchanged = false
+          break
+        }
+      }
+      if (unchanged) return node
+
+      // A single-column A1 range is expressible as a named range, so it gets
+      // pinned like a lone ref does.
+      if (node.a1.index === node.a1To.index) {
+        const legacy = legacyIdAt(node.a1.index)
+        if (!legacy) return node
+        return { kind: 'range', col: legacy, from: node.from, to: node.to }
+      }
+
+      // A RECTANGULAR range has no named equivalent (named ranges are always
+      // one column), so the only faithful rewrite is to move its endpoints to
+      // wherever the old columns live now - and only when the whole block moved
+      // as a block, or the range would silently cover a different set of
+      // columns. Anything else keeps its letters and now reports `#ERROR`,
+      // which is the honest outcome: the range spans columns this sheet does
+      // not have, and it is better seen than guessed at.
+      const first = legacyIdAt(lo)
+      const base = first ? live.indexOf(first) : -1
+      if (base < 0) return node
+      for (let k = 0; k <= hi - lo; k++) {
+        if (live[base + k] !== legacyIdAt(lo + k)) return node
+      }
+
+      const move = (col: ColRef): ColRef => ({
+        index: base + (col.index - lo),
+        absolute: col.absolute,
+      })
+      const a1 = move(node.a1)
+      const a1To = move(node.a1To)
+      return { kind: 'range', col: live[a1.index] ?? '', from: node.from, to: node.to, a1, a1To }
+    }
+
+    case 'unary': {
+      const arg = migrateNode(node.arg, live)
+      return arg === node.arg ? node : { kind: 'unary', op: node.op, arg }
+    }
+
+    case 'binary': {
+      const left = migrateNode(node.left, live)
+      const right = migrateNode(node.right, live)
+      return left === node.left && right === node.right
+        ? node
+        : { kind: 'binary', op: node.op, left, right }
+    }
+
+    case 'call': {
+      const args = node.args.map((arg) => migrateNode(arg, live))
+      return args.every((arg, i) => arg === node.args[i])
+        ? node
+        : { kind: 'call', name: node.name, args }
+    }
+  }
+}
+
+/**
+ * Rewrite one formula authored against `LEGACY_LETTER_SPACE` so it keeps
+ * computing the same value on a sheet whose data columns are `liveColumnIds`
+ * (in definition order). Returns the input string untouched when nothing needs
+ * rewriting, when it is not a formula, or when it does not parse.
+ */
+export function migrateLegacyA1Formula(
+  src: string,
+  liveColumnIds: readonly string[],
+): string {
+  if (!isFormula(src)) return src
+  const ast = parseFormula(src)
+  if (!ast) return src
+  const migrated = migrateNode(ast, liveColumnIds)
+  // `migrateNode` shares structure, so an identical reference means "no A1
+  // reference changed meaning" and the author's exact text survives.
+  return migrated === ast ? src : stringifyFormula(migrated)
+}
+
+/**
+ * `migrateLegacyA1Formula` over a whole stored formula map. Returns the input
+ * object itself when no entry changed, so a loader can tell a migration
+ * happened (and re-save) by identity alone.
+ */
+export function migrateLegacyA1Formulas(
+  formulas: Record<string, string>,
+  liveColumnIds: readonly string[],
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  let changed = false
+  for (const [key, src] of Object.entries(formulas)) {
+    const next = migrateLegacyA1Formula(src, liveColumnIds)
+    if (next !== src) changed = true
+    out[key] = next
+  }
+  return changed ? out : formulas
+}
+
 /* --------------------------------------------------------------- evaluate */
 
 export type EvalContext = {
@@ -729,10 +887,11 @@ function rangeColumns(node: Extract<FormulaNode, { kind: 'range' }>): string[] {
 
   const lo = Math.min(node.a1.index, node.a1To.index)
   const hi = Math.max(node.a1.index, node.a1To.index)
-  if (lo < 0 || hi >= DATA_COLUMN_IDS.length) throw new FormulaError(ERROR_GENERIC)
+  // Either end past the live schema is `#ERROR`, not a silently narrower range.
+  if (lo < 0 || hi >= letterSpaceLength()) throw new FormulaError(ERROR_GENERIC)
 
   const out: string[] = []
-  for (let c = lo; c <= hi; c++) out.push(DATA_COLUMN_IDS[c])
+  for (let c = lo; c <= hi; c++) out.push(columnIdAtIndex(c))
   return out
 }
 
@@ -753,8 +912,14 @@ function evalNode(node: FormulaNode, ctx: EvalContext, scope: Scope): Value {
         return scope.locals[node.col]
       }
 
-      // An A1 reference whose letters point past the last column.
-      if (node.a1 && !node.col) throw new FormulaError(ERROR_GENERIC)
+      // An A1 reference has to land on a column that really exists in the live
+      // schema. It must NOT fall through to a normal read: `getCell` answers
+      // `undefined` for a column that is not there, `toNumber` turns that into
+      // 0, and the user gets a plausible-looking wrong number with nothing on
+      // it to say the reference was bogus. (A *named* ref is left alone - it
+      // has always read an unknown column as empty, and `=nosuchcolumn+1` is a
+      // deliberate, documented 1.)
+      if (node.a1 && !isKnownColumnId(node.col)) throw new FormulaError(ERROR_GENERIC)
 
       const rowIndex = resolveRow(node.row, ctx)
       if (rowIndex < 0) throw new FormulaError(ERROR_GENERIC)
@@ -962,7 +1127,7 @@ export function extractReferences(
           const clo = Math.min(node.a1.index, node.a1To.index)
           const chi = Math.max(node.a1.index, node.a1To.index)
           cols = []
-          for (let c = clo; c <= chi; c++) cols.push(DATA_COLUMN_IDS[c] ?? '')
+          for (let c = clo; c <= chi; c++) cols.push(columnIdAtIndex(c))
         } else {
           cols = [node.col]
         }

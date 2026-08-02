@@ -10,11 +10,28 @@
 //
 // Kept tiny and defensive: any parse / quota error degrades to "no saved sheet"
 // rather than throwing into React.
+//
+// VERSIONING. `version` is the payload's schema number, and it exists so a
+// breaking change to what the bytes MEAN can be detected and repaired on load
+// rather than silently mis-read. v1 -> v2 is exactly such a change: v1 formulas
+// were written when A1 letters resolved against a frozen list of the demo
+// schema's columns, so a `=C2` saved on a blank sheet meant `lastName` (a column
+// that sheet does not have — worth 0), while today it would mean the sheet's own
+// third column. `migrateLegacyA1Formulas` retranslates those references through
+// the old mapping so a reloaded sheet shows the numbers it showed before.
+
+import { migrateLegacyA1Formulas } from './formula'
+import { dataColumnIdsFromDefs } from './columnOrder'
 
 const KEY = 'tt.customSheet.v1'
 
+// Bumped whenever the meaning of a stored payload changes. The storage KEY is
+// deliberately NOT bumped with it — an old sheet has to be found before it can
+// be migrated.
+export const SHEET_VERSION = 2
+
 export type PersistedSheet = {
-  version: 1
+  version: typeof SHEET_VERSION
   // Column defs are plain, JSON-safe blank-sheet columns (id / accessorKey /
   // string header / meta), never render functions — safe to serialise.
   customColumns: unknown[]
@@ -33,18 +50,31 @@ export function loadCustomSheet(): PersistedSheet | null {
     if (!raw) return null
     const parsed: unknown = JSON.parse(raw)
     if (!isObject(parsed)) return null
-    if (parsed.version !== 1) return null
+    const version = parsed.version
+    if (version !== 1 && version !== SHEET_VERSION) return null
     if (!Array.isArray(parsed.customColumns) || !Array.isArray(parsed.data)) {
       return null
     }
-    const formulas: Record<string, string> = {}
+    let formulas: Record<string, string> = {}
     if (isObject(parsed.formulas)) {
       for (const [k, v] of Object.entries(parsed.formulas)) {
         if (typeof v === 'string') formulas[k] = v
       }
     }
+
+    // A v1 sheet's A1 references were bound to the old frozen letter space, not
+    // to this sheet's own columns. Retranslate them against the schema saved
+    // alongside them — that list IS this sheet's letter space — so every stored
+    // formula keeps the value it had before the space went live.
+    if (version === 1) {
+      formulas = migrateLegacyA1Formulas(
+        formulas,
+        dataColumnIdsFromDefs(parsed.customColumns),
+      )
+    }
+
     return {
-      version: 1,
+      version: SHEET_VERSION,
       customColumns: parsed.customColumns,
       data: parsed.data,
       formulas,
@@ -59,7 +89,10 @@ export function saveCustomSheet(sheet: Omit<PersistedSheet, 'version'>): void {
   try {
     localStorage.setItem(
       KEY,
-      JSON.stringify({ version: 1, ...sheet } satisfies PersistedSheet),
+      JSON.stringify({
+        version: SHEET_VERSION,
+        ...sheet,
+      } satisfies PersistedSheet),
     )
   } catch {
     /* out of quota or non-serialisable — drop silently */

@@ -522,13 +522,8 @@ export const App = ({
     [customColumns, history],
   )
 
-  // Remove a column from the blank sheet (its type override goes with it).
-  const deleteColumn = React.useCallback((columnId: string) => {
-    columnTypeOverrides.clear(columnId)
-    setCustomColumns((prev) =>
-      prev ? prev.filter((c) => String(c.id) !== columnId) : prev,
-    )
-  }, [])
+  // (`deleteColumn` lives next to `insertColumnAt` further down: it needs the
+  // same materialise-the-schema-first machinery, which is only in scope there.)
 
   // Append one empty row. In blank-sheet mode it carries every custom column id;
   // otherwise an empty object reads as blank cells against the default schema.
@@ -935,6 +930,39 @@ export const App = ({
     })
   }, [data, table])
 
+  // Apply a structural edit to whichever column tree is currently in charge:
+  // the user's blank sheet, an imported clone, or — when neither exists yet —
+  // the built-in schema, materialised into an editable clone on the spot so the
+  // change has somewhere to live. This is the ONE place that three-way decision
+  // is made; insert / delete both go through it.
+  //
+  // Every branch is a FUNCTIONAL setState, including the materialising one
+  // (`prev ?? materializeSchema()`). That is what makes the edit composable: the
+  // strip turns "3 columns selected → insert" into three calls in a single
+  // event, and a non-functional `setImportedColumns(edit(materializeSchema()))`
+  // would have had calls 2 and 3 each re-materialise from the ORIGINAL schema,
+  // so only the last insert survived.
+  const editSchema = React.useCallback(
+    (edit: (defs: typeof baseColumns) => typeof baseColumns) => {
+      if (customColumns) setCustomColumns((prev) => (prev ? edit(prev) : prev))
+      else if (importedColumns)
+        setImportedColumns((prev) => (prev ? edit(prev) : prev))
+      else setImportedColumns((prev) => edit(prev ?? materializeSchema()))
+    },
+    [customColumns, importedColumns, materializeSchema],
+  )
+
+  // True when the next structural edit is the one that turns a built-in /
+  // consumer schema into an editable clone. Computed columns (the demo's
+  // `fullName`) live only in the table, never in `data`, so their values have to
+  // be folded into the rows before the schema starts being read by key.
+  const materializeRows = React.useCallback(() => {
+    if (customColumns || importedColumns) return
+    const resolved = resolveDisplayedData()
+    if ((resolved as unknown) !== (data as unknown))
+      setData(resolved as unknown as Person[])
+  }, [customColumns, importedColumns, resolveDisplayedData, data])
+
   // Insert a blank column immediately left / right of `columnId`, in ANY schema —
   // flat or grouped, built-in or user-authored. When the schema is not yet
   // user-owned it is materialised first (so the change persists), then the new
@@ -946,19 +974,18 @@ export const App = ({
         .toString(36)
         .slice(2, 5)}`
       const newCol = makeBlankColumn(newId)
-      // When we are about to materialise a built-in schema (no user-owned schema
-      // yet), fold computed column values into the rows first so columns like
-      // `fullName` survive the switch to key-based reading.
-      const willMaterialize = !customColumns && !importedColumns
-      const baseRows = willMaterialize
-        ? resolveDisplayedData()
-        : (data as unknown as Record<string, unknown>[])
-      setData(
-        baseRows.map((r) => ({ ...r, [newId]: '' }) as unknown as Person),
+      // Fold computed column values into the rows first (no-op once the schema
+      // is already user-owned), then seed the new key on every row. Both are
+      // functional so a repeated insert composes instead of clobbering.
+      materializeRows()
+      setData((prev) =>
+        (prev as unknown as Record<string, unknown>[]).map(
+          (r) => ({ ...r, [newId]: '' }) as unknown as Person,
+        ),
       )
 
       // Recursively rebuild the tree, inserting `newCol` beside the target leaf.
-      const edit = (defs: typeof baseColumns): typeof baseColumns => {
+      editSchema((defs) => {
         let done = false
         const walk = (arr: unknown[]): unknown[] => {
           const out: unknown[] = []
@@ -977,14 +1004,49 @@ export const App = ({
           return out
         }
         return walk(defs) as typeof baseColumns
-      }
-
-      if (customColumns) setCustomColumns((prev) => (prev ? edit(prev) : prev))
-      else if (importedColumns)
-        setImportedColumns((prev) => (prev ? edit(prev) : prev))
-      else setImportedColumns(edit(materializeSchema()))
+      })
     },
-    [customColumns, importedColumns, materializeSchema, resolveDisplayedData, data],
+    [editSchema, materializeRows],
+  )
+
+  // Remove a column, in ANY schema.
+  //
+  // This used to filter `customColumns` and nothing else, which made it a silent
+  // no-op on every sheet the user had not authored — including the demo the app
+  // opens on. Worse, `insertColumnAt` above materialises a built-in schema into
+  // `importedColumns`, so inserting a column and then deleting it appeared to do
+  // nothing at all: the delete looked in the one place the new column was not.
+  // It now takes the same three-way `editSchema` path insert and rename take.
+  //
+  // The walk recurses so a column nested under a group header is reachable, and
+  // a group left with no children goes with it rather than hanging over a gap.
+  // The cell VALUES stay in `data` under the dropped key: nothing else reads
+  // them, and leaving them there is what lets an undo of the enclosing snapshot
+  // put the column back with its contents intact.
+  const deleteColumn = React.useCallback(
+    (columnId: string) => {
+      columnTypeOverrides.clear(columnId)
+      materializeRows()
+      editSchema((defs) => {
+        const walk = (arr: unknown[]): unknown[] => {
+          const out: unknown[] = []
+          for (const raw of arr) {
+            const def = raw as Record<string, unknown>
+            if (String(def.id ?? def.accessorKey) === columnId) continue
+            if (Array.isArray(def.columns)) {
+              const kids = walk(def.columns)
+              if (!kids.length) continue
+              out.push({ ...def, columns: kids })
+            } else {
+              out.push(def)
+            }
+          }
+          return out
+        }
+        return walk(defs) as typeof baseColumns
+      })
+    },
+    [editSchema, materializeRows],
   )
 
   // ── Find in table (Ctrl+F) ──────────────────────────────────────────────────
@@ -1539,7 +1601,11 @@ export const App = ({
                   }
                   onInsertColumn={insertColumnAt}
                   onInsertRow={insertRow}
-                  onDeleteColumn={isCustomSchema ? deleteColumn : undefined}
+                  // Deliberately NOT gated on `isCustomSchema`, for the same
+                  // reason insert never was: gating only delete meant the demo
+                  // schema let you add columns you could then never remove. Both
+                  // sides now materialise the schema on first structural edit.
+                  onDeleteColumn={deleteColumn}
                   onDeleteRow={(dataRowIndex) => deleteRows([dataRowIndex])}
                   rowHeights={rowHeights}
                   onRowHeightsChange={setRowHeights}

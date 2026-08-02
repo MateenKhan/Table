@@ -35,9 +35,32 @@ import {
   type Attachment,
 } from './attachments'
 import { isColumnSchema, type ColumnSchemaNode } from './columnSchema'
+import { dataColumnIdsFromDefs } from './columnOrder'
+import { migrateLegacyA1Formulas } from './formula'
+
+// The payload schema number. It is not decoration: it is how a snapshot read
+// back from a file, a .zip or a URL hash can be told apart from one written
+// under different RULES, and repaired instead of silently mis-read.
+//
+//   v1 — A1 letters resolved against a frozen list of the built-in demo
+//        schema's columns, whatever schema the snapshot actually carried. A
+//        `=C2` shared from a blank sheet therefore meant `lastName` — a column
+//        that sheet does not have, read as empty, worth 0.
+//   v2 — letters resolve against the snapshot's OWN columns. Reading a v1
+//        payload retranslates its A1 references through the old mapping first
+//        (see `migrateSnapshotFormulas`), so a shared view still shows the
+//        numbers its author saw.
+//
+// Everything this module WRITES is stamped v2 (`forExport`); `version: 1` on
+// the way in is what identifies a genuinely old file.
+export const SNAPSHOT_VERSION = 2
 
 export type AppSnapshot = {
-  version: 1
+  // `1` stays assignable so an in-process snapshot built by App — which is
+  // authored under the current rules regardless of the number it carries — still
+  // typechecks. Only payloads that have been through `validateSnapshot` or
+  // `forExport` are guaranteed to be v2.
+  version: 1 | 2
   data: Record<string, unknown>[] // the rows (incl. computed values)
   formulas: Record<string, string> // formula sources by "row:col"
   formatting: Record<string, unknown> // tableFormatting.snapshot()
@@ -85,6 +108,43 @@ export function getAppUrl(): string {
 const isObject = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
 
+/* -------------------------------------------------------------- migration */
+
+/**
+ * Retranslate a v1 snapshot's A1 references onto the columns the snapshot
+ * actually carries, so its formulas keep computing what they computed for the
+ * person who shared it.
+ *
+ * The letter space of the sheet is its own leaf columns, in definition order —
+ * taken from `columnSchema` (the full tree, present in every export that can
+ * rebuild a table) and falling back to `customColumns` (an older blank-sheet
+ * export). When a snapshot carries NEITHER it rode on the built-in schema,
+ * which is exactly the mapping v1 formulas were written against, so there is
+ * nothing to rewrite — passing that list through leaves every formula's own
+ * text intact.
+ */
+function migrateSnapshotFormulas(
+  formulas: Record<string, string>,
+  columnSchema: ColumnSchemaNode[] | undefined,
+  customColumns: unknown[] | undefined,
+): Record<string, string> {
+  const defs = columnSchema ?? customColumns
+  if (!defs) return formulas
+  return migrateLegacyA1Formulas(formulas, dataColumnIdsFromDefs(defs))
+}
+
+/**
+ * Stamp a snapshot with the CURRENT payload version on its way out of the
+ * process. Everything App builds is authored under today's rules whatever
+ * number the object literal carries, so every writer below funnels through
+ * this — which is what keeps `version: 1` on the way IN a reliable signal that
+ * the bytes are genuinely old.
+ */
+const forExport = (snapshot: AppSnapshot): AppSnapshot =>
+  snapshot.version === SNAPSHOT_VERSION
+    ? snapshot
+    : { ...snapshot, version: SNAPSHOT_VERSION }
+
 /**
  * Structurally validate an arbitrary parsed value into an `AppSnapshot`, or
  * `null` when it is not one. Never throws — every entry point that reads foreign
@@ -94,12 +154,12 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
  */
 function validateSnapshot(input: unknown): AppSnapshot | null {
   if (!isObject(input)) return null
-  if (input.version !== 1) return null
+  if (input.version !== 1 && input.version !== SNAPSHOT_VERSION) return null
   if (!Array.isArray(input.data)) return null
 
   const data = input.data.filter(isObject) as Record<string, unknown>[]
 
-  const formulas: Record<string, string> = {}
+  let formulas: Record<string, string> = {}
   if (isObject(input.formulas)) {
     for (const [k, v] of Object.entries(input.formulas)) {
       if (typeof v === 'string') formulas[k] = v
@@ -132,8 +192,12 @@ function validateSnapshot(input: unknown): AppSnapshot | null {
     ? input.customColumnTypes
     : undefined
 
+  if (input.version === 1) {
+    formulas = migrateSnapshotFormulas(formulas, columnSchema, customColumns)
+  }
+
   return {
-    version: 1,
+    version: SNAPSHOT_VERSION,
     data,
     formulas,
     formatting,
@@ -286,7 +350,7 @@ export async function buildZipExport(snapshot: AppSnapshot): Promise<ZipSummary>
     }),
   )
 
-  const outSnapshot: AppSnapshot = { ...snapshot, data }
+  const outSnapshot: AppSnapshot = forExport({ ...snapshot, data })
   archive['view.json'] = strToU8(JSON.stringify(outSnapshot, null, 2))
   archive['README.txt'] = strToU8(
     [
@@ -360,7 +424,7 @@ function safeBaseName(name: string, fallback: string): string {
 /** Download the snapshot as a pretty-printed `.json` file. The lossless path. */
 export function downloadSnapshotJson(snapshot: AppSnapshot, filename?: string): void {
   const name = safeBaseName(filename ?? '', 'table-view') + '.json'
-  const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
+  const blob = new Blob([JSON.stringify(forExport(snapshot), null, 2)], {
     type: 'application/json',
   })
   triggerDownload(blob, name)
@@ -387,7 +451,7 @@ export async function downloadZipExport(
  * the case where the auto-redirect is blocked.
  */
 export function buildShareHtml(snapshot: AppSnapshot, appUrl: string): string {
-  const payload = compressToEncodedURIComponent(JSON.stringify(snapshot))
+  const payload = compressToEncodedURIComponent(JSON.stringify(forExport(snapshot)))
   const target = `${appUrl}#view=${payload}`
   // Escape for safe embedding in an HTML attribute / text node.
   const escapeHtml = (s: string) =>

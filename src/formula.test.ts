@@ -11,6 +11,8 @@ import {
   createFunctionRegistry,
   customFunctions,
   findCircularKeys,
+  migrateLegacyA1Formula,
+  migrateLegacyA1Formulas,
   ERROR_CIRCULAR,
 } from './formula'
 import type { FormulaMap } from './formula'
@@ -20,9 +22,15 @@ import {
   columnIdFromLetters,
   columnIndexForId,
   columnLetters,
+  dataColumnIdsFromDefs,
+  getLetterSpace,
   lettersForColumnId,
   lettersToIndex,
+  observeLetterColumn,
+  resetLetterSpace,
+  setLetterSpace,
 } from './columnOrder'
+import { blankColumns } from './blankSheet'
 import { parseTSV, serializeTSV } from './clipboard'
 import {
   applyFormulaPatch,
@@ -879,5 +887,181 @@ check(
   })(),
   20,
 )
+
+/* ========================================== the live A1 letter space == */
+//
+// Everything above runs on the DEFAULT letter space (the built-in demo schema),
+// which is what a headless caller gets. From here the space is driven the way
+// the grid drives it, so these tests must stay LAST — `resetLetterSpace()` at
+// the end of the file puts it back.
+
+console.log('\n-- the blank-sheet bug (letters the engine never had) --')
+
+// A blank sheet: six generic columns, exactly as `blankColumns` builds them.
+const blank = dataColumnIdsFromDefs(blankColumns(6))
+check('blankColumns gives col1..col6', blank.join(','), 'col1,col2,col3,col4,col5,col6')
+
+// Register them the way the header's letter row does: one call per data column,
+// left to right, positional index counting data columns only.
+const registerHeaderRow = (ids: string[]) =>
+  ids.forEach((id, index) => observeLetterColumn(id, index))
+
+registerHeaderRow(blank)
+
+check('a whole new schema replaces the space', getLetterSpace().join(','), blank.join(','))
+check('C is the third column of THIS sheet', columnIdFromLetters('C'), 'col3')
+check('and col3 draws a C in the header', lettersForColumnId('col3'), 'C')
+check('F is col6', columnIdFromLetters('F'), 'col6')
+check('G is past the end', columnIdFromLetters('G'), '')
+
+// The reported repro, cell for cell: 1 in C2, 2 in C3, `=C2+C3` in F8.
+const sheet: Record<string, unknown>[] = [
+  { col1: '', col2: '', col3: '', col4: '', col5: '', col6: '' },
+  { col1: '', col2: '', col3: 1, col4: '', col5: '', col6: '' },
+  { col1: '', col2: '', col3: 2, col4: '', col5: '', col6: '' },
+]
+const sev = (src: string, row = 7) => {
+  const result = evaluateFormula(src, {
+    currentRow: row,
+    getCell: (r: number, c: string) => sheet[r]?.[c],
+  })
+  return result.ok ? result.value : result.error
+}
+
+check('=C2+C3 on a blank sheet is 3, not 0', sev('=C2+C3'), 3)
+check('=SUM(C2:C3)', sev('=SUM(C2:C3)'), 3)
+check('=C2*10', sev('=C2*10'), 10)
+
+console.log('\n-- an unresolvable A1 ref is an error, never a quiet 0 --')
+check('letters past the last column', sev('=G1'), '#ERROR')
+check('and in arithmetic, so it cannot hide', sev('=G1+C2'), '#ERROR')
+check('a range running off the end', sev('=SUM(A1:G2)'), '#ERROR')
+check('an empty cell inside the schema is still 0', sev('=C1'), 0)
+// Named refs are unchanged: an unknown NAME has always read as empty.
+check('an unknown column NAME still reads as empty', sev('=nosuchcolumn+1'), 1)
+
+console.log('\n-- registration is append-only --')
+// A hidden column is simply absent from the pass. Its letter must survive, or
+// hiding one column would change what every formula after it computes.
+registerHeaderRow(['col1', 'col2', 'col4', 'col5', 'col6'])
+check('hiding col3 does not re-letter col4', lettersForColumnId('col4'), 'D')
+check('and col3 keeps its C', columnIdFromLetters('C'), 'col3')
+
+// A column added at runtime claims the next free letter, wherever it was
+// inserted on screen.
+registerHeaderRow(['col1', 'col7', 'col2', 'col3', 'col4', 'col5', 'col6'])
+check('a new column claims the next letter', lettersForColumnId('col7'), 'G')
+check('the existing letters are untouched', columnIdFromLetters('C'), 'col3')
+
+// Nothing in the pass is a column we know: the schema was swapped wholesale.
+registerHeaderRow(DATA_COLUMN_IDS)
+check('a wholesale swap starts over', columnIdFromLetters('E'), 'age')
+check('and drops the old sheet entirely', lettersForColumnId('col3'), '')
+
+console.log('\n-- named references are untouched by any of this --')
+check('=age is still the age column', gev('=age'), 10)
+check('=age[3]', gev('=age[3]'), 30)
+check('=age[$1] from row 2', gev('=age[$1]', 2), 10)
+check('=age1 name+row', gev('=age1'), 10)
+check('=SUM(age[1]:age[4])', gev('=SUM(age[1]:age[4])'), 100)
+check('$E$1 absolute A1 still resolves', gev('=$E$1', 2), 10)
+check('2-D A1 range still resolves', gev('=SUM(E1:F2)'), 330)
+
+console.log('\n-- dataColumnIdsFromDefs --')
+check(
+  'walks groups and skips the select gutter',
+  dataColumnIdsFromDefs([
+    { id: 'select' },
+    { header: 'Name', columns: [{ accessorKey: 'firstName' }, { id: 'lastName' }] },
+    { kind: 'group', columns: [{ kind: 'leaf', id: 'age', accessorKey: 'age' }] },
+  ]).join(','),
+  'firstName,lastName,age',
+)
+check('non-arrays give nothing', dataColumnIdsFromDefs(null).length, 0)
+check(
+  'duplicates claim one letter each',
+  dataColumnIdsFromDefs([{ id: 'a' }, { id: 'a' }, { id: 'b' }]).join(','),
+  'a,b',
+)
+
+/* ============================== migrating formulas saved before the fix == */
+//
+// A v1 payload's letters were bound to the frozen demo list. Migration
+// retranslates them through that old mapping onto the column they always meant,
+// so the numbers a reloaded sheet shows are the numbers it showed before.
+
+console.log('\n-- legacy A1 migration --')
+const mig = (src: string) => migrateLegacyA1Formula(src, blank)
+
+check('C2 meant lastName row 2', mig('=C2+C3'), '=lastName[2] + lastName[3]')
+check('E1 meant age row 1', mig('=E1'), '=age[1]')
+check('$E$1 keeps its absolute row', mig('=$E$1'), '=age[$1]')
+check('E$1 keeps its absolute row', mig('=E$1'), '=age[$1]')
+check('$E1 stays relative', mig('=$E1'), '=age[1]')
+check('a one-column range becomes a named range', mig('=SUM(E1:E4)'), '=SUM(age[1]:age[4])')
+check('mixed with a named ref', mig('=E1+age[2]'), '=age[1] + age[2]')
+check('letters past the OLD space are left alone', mig('=Z1'), '=Z1')
+check('a formula with no A1 refs is byte-identical', mig('=age[1]  +1'), '=age[1]  +1')
+check('a plain value is not a formula', mig('42'), '42')
+check('an unparseable formula passes through', mig('=((('), '=(((')
+
+// A sheet still on the built-in schema means exactly what it always meant, so
+// nothing is rewritten and nobody's `=E1` turns into `age[1]` for no reason.
+check('the demo schema migrates to itself', migrateLegacyA1Formula('=E1+F2', DATA_COLUMN_IDS), '=E1+F2')
+check(
+  'even for ranges',
+  migrateLegacyA1Formula('=SUM($E$1:$F$2)', DATA_COLUMN_IDS),
+  '=SUM($E$1:$F$2)',
+)
+
+check(
+  'a map with nothing to do comes back by identity',
+  (() => {
+    const m = { '0:x': '=E1', '1:x': '=age' }
+    return migrateLegacyA1Formulas(m, DATA_COLUMN_IDS) === m
+  })(),
+  true,
+)
+check(
+  'a map that changed comes back rewritten',
+  JSON.stringify(migrateLegacyA1Formulas({ '7:col6': '=C2+C3' }, blank)),
+  JSON.stringify({ '7:col6': '=lastName[2] + lastName[3]' }),
+)
+
+console.log('\n-- migration preserves the value, which is the whole point --')
+// What the OLD engine did: letters resolved against the frozen demo list, so on
+// a blank sheet they landed on demo ids the data has no key for — empty, 0.
+const legacyValue = (src: string) => {
+  setLetterSpace(DATA_COLUMN_IDS)
+  const result = evaluateFormula(src, {
+    currentRow: 7,
+    getCell: (r: number, c: string) => sheet[r]?.[c],
+  })
+  return result.ok ? result.value : result.error
+}
+// What the NEW engine does with the migrated text, on the sheet's own letters.
+const migratedValue = (src: string) => {
+  setLetterSpace(blank)
+  return sev(migrateLegacyA1Formula(src, blank))
+}
+
+for (const src of ['=C2+C3', '=SUM(E1:E4)', '=E1*2+1', '=ROUND(E1/3, 2)', '=C2']) {
+  const before = legacyValue(src)
+  check(`${src} computes the same before and after`, migratedValue(src), before)
+}
+// ...and the pre-fix reading of `=C2+C3` really was the bogus 0 this fixes.
+check('the old answer was a silent 0', legacyValue('=C2+C3'), 0)
+
+// A migrated formula is a named ref, so a fill still shifts it by the same rows.
+setLetterSpace(blank)
+check(
+  'a migrated formula still fills',
+  translateFormula(migrateLegacyA1Formula('=C2+C3', blank), 5),
+  '=lastName[7] + lastName[8]',
+)
+
+// Leave the space as the rest of the suite (and any later import) expects.
+resetLetterSpace()
+check('the space resets to the built-in schema', columnIdFromLetters('E'), 'age')
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

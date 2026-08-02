@@ -2,15 +2,25 @@ import React from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import OverflowGroups from './OverflowGroups'
 
-// The actions div. Collapsed, it's a SINGLE row split ~50/50: the search query
-// on the left keeps at least half the width, and the contextual selection ops
-// (the "CELL / ROW / COLUMN" strip) live in the right half — capped there and
-// horizontally scrollable, so a wide strip never overruns the search. The peek
-// of general quick actions and the expand toggle stay pinned at the far right.
+// The actions div. Collapsed, it's a SINGLE row split 50/50: the search query
+// on the left, and the contextual selection ops (the "CELL / ROW / COLUMN"
+// strip) in the right half, ahead of the peek of general quick actions and the
+// expand toggle, which stay pinned at the far right.
 //
-// Expanded, the ops strip drops BELOW at full width (so every contextual icon is
-// visible without scrolling) followed by the full captioned action groups, and
-// the top row becomes just the search + toggle.
+// Expanded, the ops strip drops onto its OWN full-width row (so far more of it
+// fits inline) followed by the full captioned action groups, and the top row
+// becomes just the search + toggle.
+//
+// ── Why the ops half is a FIXED share, not `max-w-[50%]` ──────────────────────
+// It used to be `sm:w-auto sm:max-w-[50%]` around a `shrink overflow-x-auto`
+// scroller. That made the ops column's width a function of its own content —
+// fine for a scroller that just clipped (which is exactly how "Delete row" and
+// "Delete column" ended up rendered hundreds of pixels off-screen with no
+// affordance), but fatal now that the strip MEASURES its container to decide
+// what to fold into its "⋮" overflow menu: content shrinks → the auto-width
+// column shrinks → more room is reported → content grows → oscillation.
+// A definite `sm:w-1/2` with the strip as a `flex-1 min-w-0` child inside it
+// breaks that loop: the measurement no longer depends on what is measured.
 
 type Props = {
   // The query input — always visible, no label.
@@ -64,13 +74,13 @@ export default function ActionsRow({
         {/* Search — full width on narrow screens (actions wrap below); on sm+ it
             grows but keeps at least half the row. */}
         <div className="min-w-0 grow basis-full sm:basis-1/2">{query}</div>
-        {/* Actions half: contextual ops (capped + scrollable) then peek + toggle,
-            pinned right. Full width on narrow (wraps under the search); capped to
-            half on sm+. When expanded the ops move below, leaving just the peek +
-            toggle here. */}
-        <div className="flex w-full min-w-0 shrink items-center justify-end gap-1 sm:w-auto sm:max-w-[50%]">
+        {/* Actions half: the contextual ops take whatever the peek + toggle do
+            not, inside a half-row that is exactly half wide (see the note above).
+            Full width on narrow, where it wraps under the search. When expanded
+            the ops move to their own row below, leaving just peek + toggle. */}
+        <div className="flex w-full min-w-0 items-center justify-end gap-1 sm:w-1/2">
           {!expanded ? (
-            <div className="min-w-0 shrink overflow-x-auto">{ops}</div>
+            <div className="min-w-0 flex-1 overflow-hidden">{ops}</div>
           ) : null}
           {!expanded ? (
             <div className="flex shrink-0 items-center gap-1">{peek}</div>
@@ -78,17 +88,15 @@ export default function ActionsRow({
           {toggle}
         </div>
       </div>
-      {/* Expanded: the contextual strip (Format etc.) leads and scrolls if wide;
-          the captioned action groups (Pagination, Tools, Danger) follow, and any
-          that don't fit collapse into a "⋮" overflow menu (Google-Sheets style)
-          rather than wrapping or clipping — the grouping is always preserved. */}
+      {/* Expanded: the contextual strip gets a full-width row of its own (so it
+          has the whole container to lay out in and folds far less into its own
+          "⋮"), then the captioned action groups (Pagination, Tools, Danger) get
+          theirs — and any that don't fit collapse into the same Google-Sheets
+          "⋮" overflow menu rather than wrapping or clipping, so the grouping is
+          always preserved. */}
+      {expanded ? ops : null}
       {expanded ? (
-        <div className="flex items-center gap-2">
-          <div className="min-w-0 shrink overflow-x-auto empty:hidden">{ops}</div>
-          <OverflowGroups className="flex-1 justify-end">
-            {children}
-          </OverflowGroups>
-        </div>
+        <OverflowGroups className="justify-end">{children}</OverflowGroups>
       ) : null}
     </div>
   )

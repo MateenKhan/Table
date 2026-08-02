@@ -15,10 +15,9 @@ import useColumnDrag from '../useColumnDrag'
 import useRowDrag, { buildRowPermutation } from '../useRowDrag'
 import { alignmentFor } from '../columnTypes'
 import {
-  columnIndexForId,
   columnLetters,
-  isKnownColumnId,
   lettersForColumnId,
+  observeLetterColumn,
   NON_DATA_COLUMN_IDS,
 } from '../columnOrder'
 import {
@@ -115,19 +114,30 @@ function BorderOverlay({ borders }: { borders: Borders }) {
 const ROW_NUMBER_WIDTH = 48
 
 /**
- * The Excel coordinate letter shown above a leaf column. Known data columns use
- * the FORMULA engine's frozen letter (definition order, so `A` is whatever `=A1`
- * references, regardless of on-screen position); anything else - the `select`
- * checkbox, a runtime combined column - falls back to its positional index among
- * the data columns, or blanks out for non-data columns entirely.
+ * The Excel coordinate letter shown above a leaf column.
+ *
+ * This function is BOTH the display rule and the registration point for the
+ * formula engine's letter space, and that is the whole point. It used to be
+ * only the display rule, with its own fallback: columns the engine knew about
+ * got the engine's letter, and everything else — a blank sheet's `col1..colN`,
+ * a column added at runtime — got its positional index instead. So the header
+ * drew `A B C D E F` over columns `=C2` had never heard of, `=C2+C3` resolved
+ * to demo columns that were not there, and the sheet answered 0 with no error.
+ *
+ * Now the ids stream through `observeLetterColumn` (see `columnOrder.ts`) as
+ * they are drawn, which IS how the letter space is built — so what the header
+ * shows and what a formula binds cannot disagree; they are the same lookup.
+ * `select` and friends carry no data, so they claim no letter and register
+ * nothing; `positionalIndex` counts data columns only and survives as a
+ * belt-and-braces fallback for a column that somehow reaches here unregistered.
  */
 export function letterForColumn(
   columnId: string,
   positionalIndex: number,
 ): string {
   if (NON_DATA_COLUMN_IDS.includes(columnId)) return ''
-  if (isKnownColumnId(columnId)) return columnLetters(columnIndexForId(columnId))
-  return columnLetters(positionalIndex)
+  observeLetterColumn(columnId, positionalIndex)
+  return lettersForColumnId(columnId) || columnLetters(positionalIndex)
 }
 
 // Sticky offsets for a header cell. Headers are used rather than columns so the
@@ -1132,105 +1142,131 @@ export function CustomTable<T extends RowData>({
   }
 
   // ── Inline contextual ops strip ─────────────────────────────────────────────
-  // Driven entirely by the current selection (no click-anchored popup state).
-  // A single-column selection shows that column's ops; a single-row selection
-  // shows that row's ops (height / freeze wired to the same helpers above); a
-  // cell / range / whole-grid (or multi-column / multi-row) selection shows the
-  // format-only cluster across every scope key the selection covers. Nothing
-  // selected → no strip.
+  // ONE strip, handed the REAL `SelectionScope`. This used to be three mutually
+  // exclusive branches gated on `length === 1`, which is why a multi-row or
+  // multi-column selection silently fell through to a format-only strip with no
+  // structural ops at all — and why the scope, computed right here, was thrown
+  // away before the strip ever saw it. The strip now filters and orders its own
+  // actions from that scope (see CellContextPopup), so this only binds callbacks.
+  //
+  // Bulk shape, per callback:
+  //   • the two INSERTS are single inserts anchored at the edge of the selection
+  //     (left of the first / right of the last column, above the first / below
+  //     the last row). The strip calls them once per selected line, which stacks
+  //     into N — App's insert handlers use functional state updates, so repeated
+  //     calls inside one event compose instead of clobbering each other.
+  //   • the two DELETES take the WHOLE selection in one call: column ids are
+  //     named directly, and rows are removed HIGHEST-INDEX-FIRST so dropping one
+  //     never shifts the index of another still to be dropped.
+  //   • row height / freeze already batch across a multi-row selection
+  //     internally (see `applyRowHeight` / `toggleRowPin`), so they are anchored
+  //     on the first selected row and simply passed through — which is also what
+  //     finally makes that batching reachable.
   const scope = selection?.selectionScope
   const stripScopeKeys = selection?.getFormatScopeKeys() ?? []
 
   let strip: React.ReactNode = null
   if (selection && scope && scope.kind !== 'none' && stripScopeKeys.length) {
-    if (scope.kind === 'columns' && scope.columnIds.length === 1) {
-      const columnId = scope.columnIds[0]
-      strip = (
-        <CellContextStrip
-          scopeKeys={stripScopeKeys}
-          title={`Column ${lettersForColumnId(columnId) || columnId}`}
-          table={table}
-          column={table.getColumn(columnId) ?? undefined}
-          onEnterFormula={
-            selection.isReadOnlyColumn(columnId)
-              ? undefined
-              : () => selection.beginEditColumn(columnId)
-          }
-          onInsertColumnLeft={
-            onInsertColumn ? () => onInsertColumn(columnId, 'left') : undefined
-          }
-          onInsertColumnRight={
-            onInsertColumn ? () => onInsertColumn(columnId, 'right') : undefined
-          }
-          onDeleteColumn={
-            onDeleteColumn ? () => onDeleteColumn(columnId) : undefined
-          }
-          fontSizes={fontSizes}
-          fontFamilies={fontFamilies}
-        />
-      )
-    } else if (scope.kind === 'rows' && scope.rowIndices.length === 1) {
-      const dataRowIndex = scope.rowIndices[0]
-      const targetRow = rowByDataIndex.get(dataRowIndex)
-      const display = targetRow
-        ? (screenRowById.get(targetRow.id) ?? dataRowIndex) + 1
-        : dataRowIndex + 1
-      strip = (
-        <CellContextStrip
-          scopeKeys={stripScopeKeys}
-          title={`Row ${display}`}
-          rowHeight={rowHeights[dataRowIndex] ?? metrics.rowHeight}
-          onSetRowHeight={(height) => applyRowHeight(dataRowIndex, height)}
-          isRowPinned={targetRow?.getIsPinned() === 'top'}
-          onToggleRowPin={
-            targetRow ? () => toggleRowPin(targetRow) : undefined
-          }
-          onPromoteToHeader={
-            onPromoteRowToHeader
-              ? () => onPromoteRowToHeader(dataRowIndex)
-              : undefined
-          }
-          onInsertRowAbove={
-            onInsertRow ? () => onInsertRow(dataRowIndex, 'above') : undefined
-          }
-          onInsertRowBelow={
-            onInsertRow ? () => onInsertRow(dataRowIndex, 'below') : undefined
-          }
-          onDeleteRow={
-            onDeleteRow ? () => onDeleteRow(dataRowIndex) : undefined
-          }
-          fontSizes={fontSizes}
-          fontFamilies={fontFamilies}
-        />
-      )
-    } else {
-      // cell / range / all / multi-column / multi-row → format-only.
-      const stripTitle =
-        scope.kind === 'cell'
+    const { columnIds, rowIndices } = scope
+    const isColumns = scope.kind === 'columns'
+    const isRows = scope.kind === 'rows'
+    // Type / hide / arrange / enter-formula are inherently single-column ops.
+    const soleColumnId =
+      isColumns && columnIds.length === 1 ? columnIds[0] : undefined
+    const firstRowIndex = isRows ? Math.min(...rowIndices) : -1
+    const lastRowIndex = isRows ? Math.max(...rowIndices) : -1
+    const anchorRow = isRows ? rowByDataIndex.get(firstRowIndex) : undefined
+
+    const stripTitle = isColumns
+      ? columnIds.length === 1
+        ? `Column ${lettersForColumnId(columnIds[0]) || columnIds[0]}`
+        : `${columnIds.length} columns`
+      : isRows
+        ? rowIndices.length === 1
+          ? `Row ${
+              (anchorRow
+                ? (screenRowById.get(anchorRow.id) ?? firstRowIndex)
+                : firstRowIndex) + 1
+            }`
+          : `${rowIndices.length} rows`
+        : scope.kind === 'cell'
           ? 'Cell'
           : scope.kind === 'all'
             ? 'All cells'
-            : scope.kind === 'columns'
-              ? `${scope.columnIds.length} columns`
-              : scope.kind === 'rows'
-                ? `${scope.rowIndices.length} rows`
-                : 'Selection'
-      strip = (
-        <CellContextStrip
-          scopeKeys={stripScopeKeys}
-          title={stripTitle}
-          fontSizes={fontSizes}
-          fontFamilies={fontFamilies}
-          onMergeColumns={
-            scope.kind === 'columns' &&
-            scope.columnIds.length >= 2 &&
-            onMergeColumns
-              ? () => onMergeColumns!(scope.columnIds)
-              : undefined
-          }
-        />
-      )
-    }
+            : 'Selection'
+
+    strip = (
+      <CellContextStrip
+        scopeKeys={stripScopeKeys}
+        scope={scope}
+        title={stripTitle}
+        // Passed for EVERY selection now, not just a single column: the strip
+        // reads the row count off `options.data` to work out whether an autosum
+        // total has anywhere to land, and the hidden-columns menu needs it too.
+        table={table}
+        column={
+          soleColumnId ? (table.getColumn(soleColumnId) ?? undefined) : undefined
+        }
+        onEnterFormula={
+          soleColumnId && !selection.isReadOnlyColumn(soleColumnId)
+            ? () => selection.beginEditColumn(soleColumnId)
+            : undefined
+        }
+        onInsertColumnLeft={
+          isColumns && onInsertColumn
+            ? () => onInsertColumn(columnIds[0], 'left')
+            : undefined
+        }
+        onInsertColumnRight={
+          isColumns && onInsertColumn
+            ? () => onInsertColumn(columnIds[columnIds.length - 1], 'right')
+            : undefined
+        }
+        onDeleteColumn={
+          isColumns && onDeleteColumn
+            ? () => columnIds.forEach((id) => onDeleteColumn(id))
+            : undefined
+        }
+        rowHeight={
+          isRows ? (rowHeights[firstRowIndex] ?? metrics.rowHeight) : undefined
+        }
+        onSetRowHeight={
+          isRows ? (height) => applyRowHeight(firstRowIndex, height) : undefined
+        }
+        isRowPinned={anchorRow ? anchorRow.getIsPinned() === 'top' : undefined}
+        onToggleRowPin={anchorRow ? () => toggleRowPin(anchorRow) : undefined}
+        onPromoteToHeader={
+          isRows && rowIndices.length === 1 && onPromoteRowToHeader
+            ? () => onPromoteRowToHeader(firstRowIndex)
+            : undefined
+        }
+        onInsertRowAbove={
+          isRows && onInsertRow
+            ? () => onInsertRow(firstRowIndex, 'above')
+            : undefined
+        }
+        onInsertRowBelow={
+          isRows && onInsertRow
+            ? () => onInsertRow(lastRowIndex, 'below')
+            : undefined
+        }
+        onDeleteRow={
+          isRows && onDeleteRow
+            ? () =>
+                [...rowIndices]
+                  .sort((a, b) => b - a)
+                  .forEach((index) => onDeleteRow(index))
+            : undefined
+        }
+        fontSizes={fontSizes}
+        fontFamilies={fontFamilies}
+        onMergeColumns={
+          isColumns && columnIds.length >= 2 && onMergeColumns
+            ? () => onMergeColumns(columnIds)
+            : undefined
+        }
+      />
+    )
   }
 
   // Full width of the body grid in column-slots: the row-number gutter (1) + one
